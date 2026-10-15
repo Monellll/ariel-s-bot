@@ -94,6 +94,7 @@ logger = logging.getLogger(__name__)
 # In-memory state (loaded records, refreshed on Excel upload)
 # ---------------------------------------------------------------------------
 _loaded_records: list[dict] = []
+_scheduler: AsyncIOScheduler | None = None
 
 
 def _get_records() -> list[dict]:
@@ -291,7 +292,9 @@ async def _run_daily_check(bot) -> None:
 
 
 async def on_startup(application: Application) -> None:
-    """Called once when the bot starts. Load existing Excel if present."""
+    """Called once when the bot starts. Load existing Excel if present, start scheduler."""
+    global _scheduler
+
     excel_path = Path(EXCEL_FILE_PATH)
     if excel_path.exists():
         try:
@@ -307,6 +310,25 @@ async def on_startup(application: Application) -> None:
     else:
         logger.info("Startup: no existing Excel file found at %s.", excel_path)
 
+    # Set up APScheduler (event loop is running here)
+    _scheduler = AsyncIOScheduler(timezone=ZoneInfo(TIMEZONE))
+    _scheduler.add_job(
+        _run_daily_check,
+        trigger="cron",
+        hour=REMINDER_HOUR,
+        minute=REMINDER_MINUTE,
+        kwargs={"bot": application.bot},
+        id="daily_reminder_check",
+        replace_existing=True,
+    )
+    _scheduler.start()
+    logger.info(
+        "Scheduler started. Daily check at %02d:%02d %s.",
+        REMINDER_HOUR,
+        REMINDER_MINUTE,
+        TIMEZONE,
+    )
+
 
 # ---------------------------------------------------------------------------
 # Main
@@ -316,23 +338,17 @@ async def on_startup(application: Application) -> None:
 def main() -> None:
     setup_logging()
 
-    # Debug: show what env vars are actually available (names only, not values)
-    relevant_vars = {k: ("SET" if v else "EMPTY") for k, v in os.environ.items()
-                     if "TELEGRAM" in k.upper() or "ADMIN" in k.upper() or "BOT" in k.upper()}
-    logger.info("Environment check: %s", relevant_vars if relevant_vars else "NO matching vars found")
-    logger.info("BOT_TOKEN value is: %s", repr(BOT_TOKEN[:8] + "...") if BOT_TOKEN else "EMPTY/MISSING")
-
     if not BOT_TOKEN:
-        logger.critical("TELEGRAM_BOT_TOKEN is not set in .env. Exiting.")
+        logger.critical("TELEGRAM_BOT_TOKEN is not set. Exiting.")
         raise SystemExit(1)
     if not ADMIN_TELEGRAM_ID:
-        logger.critical("ADMIN_TELEGRAM_ID is not set in .env. Exiting.")
+        logger.critical("ADMIN_TELEGRAM_ID is not set. Exiting.")
         raise SystemExit(1)
 
     logger.info("Starting Ariel's Payment Reminder Bot…")
     logger.info("Admin ID: %s | Timezone: %s | Reminder days: %s", ADMIN_TELEGRAM_ID, TIMEZONE, REMINDER_DAYS_BEFORE)
 
-    # Build the application
+    # Build the application (scheduler starts inside on_startup)
     app = Application.builder().token(BOT_TOKEN).post_init(on_startup).build()
 
     # Register handlers
@@ -343,33 +359,14 @@ def main() -> None:
         MessageHandler(filters.Document.ALL & filters.ChatType.PRIVATE, handle_document)
     )
 
-    # Set up APScheduler
-    scheduler = AsyncIOScheduler(timezone=ZoneInfo(TIMEZONE))
-    scheduler.add_job(
-        _run_daily_check,
-        trigger="cron",
-        hour=REMINDER_HOUR,
-        minute=REMINDER_MINUTE,
-        kwargs={"bot": app.bot},
-        id="daily_reminder_check",
-        replace_existing=True,
-    )
-    scheduler.start()
-    logger.info(
-        "Scheduler started. Daily check at %02d:%02d %s.",
-        REMINDER_HOUR,
-        REMINDER_MINUTE,
-        TIMEZONE,
-    )
-
     # Run (blocks until Ctrl+C)
     try:
         app.run_polling(allowed_updates=Update.ALL_TYPES)
     except (KeyboardInterrupt, SystemExit):
         logger.info("Bot shutting down…")
     finally:
-        if scheduler.running:
-            scheduler.shutdown(wait=False)
+        if _scheduler and _scheduler.running:
+            _scheduler.shutdown(wait=False)
         logger.info("Bot stopped cleanly.")
 
 
