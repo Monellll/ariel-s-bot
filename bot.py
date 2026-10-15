@@ -46,7 +46,7 @@ BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
 ADMIN_TELEGRAM_ID: int = int(os.getenv("ADMIN_TELEGRAM_ID", "0"))
 EXCEL_FILE_PATH: str = os.getenv("EXCEL_FILE_PATH", "data/students.xlsx")
 TIMEZONE: str = os.getenv("TIMEZONE", "Asia/Yangon")
-REMINDER_DAYS_BEFORE: int = int(os.getenv("REMINDER_DAYS_BEFORE", "5"))
+REMINDER_DAYS_BEFORE: int = int(os.getenv("REMINDER_DAYS_BEFORE", "0"))  # TODO: TESTING — change back to "5" for production
 
 # Daily check time (24-hour, Asia/Yangon)
 REMINDER_HOUR = 8
@@ -311,23 +311,18 @@ async def on_startup(application: Application) -> None:
         logger.info("Startup: no existing Excel file found at %s.", excel_path)
 
     # Set up APScheduler (event loop is running here)
+    # TODO: TESTING MODE — runs every 3 minutes. Revert to cron for production.
     _scheduler = AsyncIOScheduler(timezone=ZoneInfo(TIMEZONE))
     _scheduler.add_job(
         _run_daily_check,
-        trigger="cron",
-        hour=REMINDER_HOUR,
-        minute=REMINDER_MINUTE,
+        trigger="interval",
+        minutes=3,
         kwargs={"bot": application.bot},
         id="daily_reminder_check",
         replace_existing=True,
     )
     _scheduler.start()
-    logger.info(
-        "Scheduler started. Daily check at %02d:%02d %s.",
-        REMINDER_HOUR,
-        REMINDER_MINUTE,
-        TIMEZONE,
-    )
+    logger.info("Scheduler started. TESTING MODE: checking every 3 minutes.")
 
 
 # ---------------------------------------------------------------------------
