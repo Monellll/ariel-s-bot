@@ -151,7 +151,8 @@ check("student_name falls back to username", records[0]["student_name"] == "@NoC
 # Test 6: Date math — reminder triggers on exact day
 # ===========================================================================
 print("\n--- Test 6: Date math (days_until_due) ---")
-today = datetime.date.today()
+from zoneinfo import ZoneInfo
+today = datetime.datetime.now(ZoneInfo("Asia/Yangon")).date()
 five_days_later = today + datetime.timedelta(days=5)
 ten_days_later = today + datetime.timedelta(days=10)
 
@@ -208,7 +209,7 @@ print("\n--- Test 8: daily_check sends correct reminders (mocked bot) ---")
 async def _run_daily_check_test():
     with tempfile.TemporaryDirectory() as tmpdir:
         json_path = Path(tmpdir) / "sent.json"
-        today = datetime.date.today()
+        today = datetime.datetime.now(ZoneInfo("Asia/Yangon")).date()
         records = [
             {  # Should send — exactly 5 days out
                 "telegram_username": "@ShouldSend",

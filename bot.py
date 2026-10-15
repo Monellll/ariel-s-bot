@@ -316,6 +316,12 @@ async def on_startup(application: Application) -> None:
 def main() -> None:
     setup_logging()
 
+    # Debug: show what env vars are actually available (names only, not values)
+    relevant_vars = {k: ("SET" if v else "EMPTY") for k, v in os.environ.items()
+                     if "TELEGRAM" in k.upper() or "ADMIN" in k.upper() or "BOT" in k.upper()}
+    logger.info("Environment check: %s", relevant_vars if relevant_vars else "NO matching vars found")
+    logger.info("BOT_TOKEN value is: %s", repr(BOT_TOKEN[:8] + "...") if BOT_TOKEN else "EMPTY/MISSING")
+
     if not BOT_TOKEN:
         logger.critical("TELEGRAM_BOT_TOKEN is not set in .env. Exiting.")
         raise SystemExit(1)
