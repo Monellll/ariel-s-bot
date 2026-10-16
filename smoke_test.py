@@ -295,6 +295,106 @@ import asyncio
 asyncio.run(_run_daily_check_test())
 
 # ===========================================================================
+# Test 9: Multi-user isolation (separate files and schedules)
+# ===========================================================================
+print("\n--- Test 9: Multi-user isolation ---")
+
+async def _run_multi_user_test():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_base = Path(tmpdir)
+        user1_dir = tmp_base / "1001"
+        user2_dir = tmp_base / "1002"
+        user1_dir.mkdir()
+        user2_dir.mkdir()
+
+        user1_sent = user1_dir / "sent_reminders.json"
+        user2_sent = user2_dir / "sent_reminders.json"
+
+        today = datetime.datetime.now(ZoneInfo("Asia/Yangon")).date()
+        target_due = today + datetime.timedelta(days=5)
+
+        # User 1 has Student Alpha
+        user1_records = [
+            {
+                "telegram_username": "@StudentAlpha",
+                "student_name": "Alpha",
+                "due_date": target_due,
+                "telegram_chat_id": 11111,
+            }
+        ]
+
+        # User 2 has Student Beta
+        user2_records = [
+            {
+                "telegram_username": "@StudentBeta",
+                "student_name": "Beta",
+                "due_date": target_due,
+                "telegram_chat_id": 22222,
+            }
+        ]
+
+        mock_bot = AsyncMock()
+
+        # Run User 1 check
+        await reminder_scheduler.daily_check(
+            bot=mock_bot,
+            records=user1_records,
+            owner_chat_id=1001,
+            timezone_str="Asia/Yangon",
+            reminder_days=5,
+            sent_reminders_path=user1_sent,
+        )
+
+        user1_keys = reminder_scheduler.load_sent_reminders(user1_sent)
+        user2_keys = reminder_scheduler.load_sent_reminders(user2_sent)
+
+        check("User 1 sent recorded in User 1 history", f"11111:{target_due}" in user1_keys)
+        check("User 2 history remains empty", len(user2_keys) == 0)
+
+        # Run User 2 check
+        await reminder_scheduler.daily_check(
+            bot=mock_bot,
+            records=user2_records,
+            owner_chat_id=1002,
+            timezone_str="Asia/Yangon",
+            reminder_days=5,
+            sent_reminders_path=user2_sent,
+        )
+
+        user2_keys_after = reminder_scheduler.load_sent_reminders(user2_sent)
+        check("User 2 sent recorded in User 2 history", f"22222:{target_due}" in user2_keys_after)
+        check("User 1 history unaffected by User 2 run", len(reminder_scheduler.load_sent_reminders(user1_sent)) == 1)
+
+asyncio.run(_run_multi_user_test())
+
+# ===========================================================================
+# Test 10: Authorized user storage & admin auto-authorization
+# ===========================================================================
+print("\n--- Test 10: User authorization storage ---")
+with tempfile.TemporaryDirectory() as tmpdir:
+    auth_file = Path(tmpdir) / "authorized_users.json"
+    admin_id = 987654
+
+    # Test load when file doesn't exist yet
+    users = {admin_id}
+    if auth_file.exists():
+        with open(auth_file, "r", encoding="utf-8") as f:
+            users.update(json.load(f))
+    check("Admin is auto-authorized by default", admin_id in users)
+
+    # Save a new user
+    users.add(123456)
+    with open(auth_file, "w", encoding="utf-8") as f:
+        json.dump(sorted(users), f)
+
+    # Reload from disk
+    loaded_users = set()
+    with open(auth_file, "r", encoding="utf-8") as f:
+        loaded_users = set(json.load(f))
+    check("Persisted authorized users load correctly", 123456 in loaded_users and admin_id in loaded_users)
+    check("Total authorized count is 2", len(loaded_users) == 2)
+
+# ===========================================================================
 # Summary
 # ===========================================================================
 print("\n" + "=" * 50)

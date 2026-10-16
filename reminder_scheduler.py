@@ -133,19 +133,21 @@ def get_upcoming_reminders(
 async def daily_check(
     bot: Bot,
     records: list[dict],
-    admin_chat_id: int,
-    timezone_str: str,
-    reminder_days: int,
+    owner_chat_id: Optional[int] = None,
+    timezone_str: str = "Asia/Yangon",
+    reminder_days: int = 5,
     sent_reminders_path: Path = SENT_REMINDERS_PATH,
+    admin_chat_id: Optional[int] = None,
 ) -> None:
     """
     Main daily reminder check.
 
     For each record:
-      - Skip if no chat_id (notify admin).
+      - Skip if no chat_id (notify owner/admin).
       - Skip if due_date already passed.
       - If days_until_due == reminder_days and not already sent → send + save key.
     """
+    notify_chat_id = owner_chat_id if owner_chat_id is not None else admin_chat_id
     tz = ZoneInfo(timezone_str)
     today = datetime.datetime.now(tz).date()
 
@@ -182,7 +184,7 @@ async def daily_check(
         if days_until_due != reminder_days:
             continue
 
-        # No chat_id → report to admin, skip
+        # No chat_id → report to owner/admin, skip
         if chat_id is None:
             skipped_no_chat_id.append(rec)
             logger.warning(
@@ -218,25 +220,25 @@ async def daily_check(
         save_sent_reminders(sent_keys, sent_reminders_path)
         logger.info("Saved %d new reminder keys.", len(newly_sent))
 
-    # Report skipped (no chat_id) to admin
-    if skipped_no_chat_id:
+    # Report skipped (no chat_id) to owner
+    if skipped_no_chat_id and notify_chat_id:
         lines = ["⚠️ Students missing Chat ID (reminders NOT sent):\n"]
         for rec in skipped_no_chat_id:
             lines.append(
                 f"• {rec.get('student_name')} ({rec.get('telegram_username')}) "
                 f"— due {rec.get('due_date')}"
             )
-        await _notify_admin(bot, admin_chat_id, "\n".join(lines))
+        await _notify_owner(bot, notify_chat_id, "\n".join(lines))
 
-    # Report failures to admin
-    if failed:
+    # Report failures to owner
+    if failed and notify_chat_id:
         lines = ["❌ Failed to send reminders:\n"]
         for rec, err in failed:
             lines.append(
                 f"• {rec.get('student_name')} ({rec.get('telegram_username')}) "
                 f"— {err}"
             )
-        await _notify_admin(bot, admin_chat_id, "\n".join(lines))
+        await _notify_owner(bot, notify_chat_id, "\n".join(lines))
 
     logger.info(
         "Daily check complete. Sent: %d, Skipped (no chat_id): %d, Failed: %d",
@@ -247,13 +249,17 @@ async def daily_check(
 
 
 # ---------------------------------------------------------------------------
-# Admin notification helper
+# Owner notification helper
 # ---------------------------------------------------------------------------
 
 
-async def _notify_admin(bot: Bot, admin_chat_id: int, text: str) -> None:
-    """Send a message to the admin, logging any failure silently."""
+async def _notify_owner(bot: Bot, chat_id: int, text: str) -> None:
+    """Send a message to the user/owner, logging any failure silently."""
     try:
-        await bot.send_message(chat_id=admin_chat_id, text=text)
+        await bot.send_message(chat_id=chat_id, text=text)
     except TelegramError as exc:
-        logger.error("Could not notify admin (chat_id=%s): %s", admin_chat_id, exc)
+        logger.error("Could not notify user (chat_id=%s): %s", chat_id, exc)
+
+
+# Backwards compatibility alias
+_notify_admin = _notify_owner

@@ -1,9 +1,10 @@
 # Secrets
 .env
 
-# Data files (contain student info — keep private)
-data/students.xlsx
-data/sent_reminders.json
+# Data files (contain student info and user records — keep private)
+data/*
+!data/.gitkeep
+!data/test_students.xlsx
 
 # Logs
 logs/*.log
