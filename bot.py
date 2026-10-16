@@ -56,6 +56,7 @@ REMINDER_MINUTE = 0
 
 DATA_DIR = Path("data")
 AUTHORIZED_USERS_PATH = DATA_DIR / "authorized_users.json"
+CHAT_ID_REGISTRY_PATH = DATA_DIR / "chat_id_registry.json"
 LOGS_DIR = Path("logs")
 
 # ---------------------------------------------------------------------------
@@ -126,6 +127,9 @@ _authorized_users: set[int] = set()
 # Users awaiting authorization (sent /start but haven't provided admin Chat ID yet)
 _pending_auth: set[int] = set()
 
+# Chat ID registry: maps lowercase @username -> chat_id (auto-captured when users /start)
+_chat_id_registry: dict[str, int] = {}
+
 _scheduler: AsyncIOScheduler | None = None
 
 # ---------------------------------------------------------------------------
@@ -158,6 +162,67 @@ def _save_authorized_users() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Chat ID registry persistence
+# ---------------------------------------------------------------------------
+
+
+def _load_chat_id_registry() -> dict[str, int]:
+    """Load the @username -> chat_id registry from JSON."""
+    if not CHAT_ID_REGISTRY_PATH.exists():
+        return {}
+    try:
+        with open(CHAT_ID_REGISTRY_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            return {k.lower(): int(v) for k, v in data.items()}
+    except (json.JSONDecodeError, OSError, ValueError) as exc:
+        logger.warning("Could not load chat_id_registry.json: %s", exc)
+    return {}
+
+
+def _save_chat_id_registry() -> None:
+    """Save the @username -> chat_id registry to JSON."""
+    try:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        with open(CHAT_ID_REGISTRY_PATH, "w", encoding="utf-8") as f:
+            json.dump(_chat_id_registry, f, indent=2)
+    except OSError as exc:
+        logger.error("Could not save chat_id_registry.json: %s", exc)
+
+
+def _register_chat_id(username: str | None, chat_id: int) -> None:
+    """Register a @username -> chat_id mapping (if username is available)."""
+    if not username:
+        return
+    key = f"@{username.lower().lstrip('@')}"
+    if _chat_id_registry.get(key) != chat_id:
+        _chat_id_registry[key] = chat_id
+        _save_chat_id_registry()
+        logger.info("Registered chat_id %s for %s", chat_id, key)
+
+
+def _resolve_chat_ids(records: list[dict]) -> int:
+    """
+    Fill in missing telegram_chat_id from the registry.
+    Returns the number of records resolved.
+    """
+    resolved = 0
+    for rec in records:
+        if rec.get("telegram_chat_id"):
+            continue  # Already has a chat_id
+        username = rec.get("telegram_username")
+        if not username:
+            continue
+        key = username.lower()
+        chat_id = _chat_id_registry.get(key)
+        if chat_id:
+            rec["telegram_chat_id"] = chat_id
+            resolved += 1
+            logger.info("Resolved chat_id for %s -> %s", username, chat_id)
+    return resolved
+
+
+# ---------------------------------------------------------------------------
 # Guards
 # ---------------------------------------------------------------------------
 
@@ -176,11 +241,14 @@ def _is_authorized(update: Update) -> bool:
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """/start — Welcome authorized users, auth flow for new users."""
+    """/start — Welcome authorized users, register + auth flow for new users."""
     user = update.effective_user
     chat_id = update.effective_chat.id
     user_id = user.id
     name = user.first_name if user else "there"
+
+    # Always register username -> chat_id for reminder delivery
+    _register_chat_id(user.username, chat_id)
 
     if user_id in _authorized_users:
         # Already authorized (admin or previously approved)
@@ -198,12 +266,17 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
         await update.message.reply_text(text, parse_mode="Markdown")
     else:
-        # New user — ask for admin Chat ID
+        # New user — registered for reminders + offer teacher authorization
         _pending_auth.add(user_id)
         text = (
             f"👋 Hello, {name}!\n\n"
-            "To use this bot, you need to be authorized.\n\n"
-            "Please enter the *Admin Chat ID* to continue:"
+            "✅ *You are now registered!*\n"
+            "You will receive automatic payment reminders when your "
+            "teacher schedules them.\n\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "🎓 *Are you a teacher/admin?*\n"
+            "Enter the *Admin Chat ID* below to get full access.\n"
+            "━━━━━━━━━━━━━━━━━━━━"
         )
         await update.message.reply_text(text, parse_mode="Markdown")
 
@@ -312,15 +385,36 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         user_id, len(valid_records), invalid_count,
     )
 
+    # Auto-resolve missing chat_ids from the registry
+    resolved = _resolve_chat_ids(valid_records)
+    unresolved = sum(1 for r in valid_records if not r.get("telegram_chat_id"))
+
     total = len(valid_records) + invalid_count
     reply_lines = [
         "✅ *Excel file imported successfully!*",
         f"Total records: {total}",
         f"Valid records: {len(valid_records)}",
         f"Invalid records: {invalid_count}",
-        "",
-        "Automatic payment reminders are now scheduled.",
     ]
+
+    if resolved:
+        reply_lines.append(f"🔗 Auto-matched chat IDs: {resolved}")
+    if unresolved:
+        reply_lines.append(f"⚠️ Students not yet registered: {unresolved}")
+        # List unresolved usernames
+        unresolved_names = [
+            r.get("telegram_username", "?")
+            for r in valid_records
+            if not r.get("telegram_chat_id")
+        ]
+        reply_lines.append(
+            "These students need to tap /start on this bot: "
+            + ", ".join(unresolved_names[:10])
+        )
+        if len(unresolved_names) > 10:
+            reply_lines.append(f"… and {len(unresolved_names) - 10} more.")
+
+    reply_lines += ["", "Automatic payment reminders are now scheduled."]
     if errors:
         reply_lines += ["", "⚠️ *Issues found (rows skipped):*", _format_errors(errors)]
 
@@ -404,6 +498,8 @@ async def _run_daily_check(bot) -> None:
     for user_id, records in _user_records.items():
         if not records:
             continue
+        # Try to resolve any newly registered chat_ids
+        _resolve_chat_ids(records)
         logger.info("Daily check for user %s (%d records).", user_id, len(records))
         try:
             await reminder_scheduler.daily_check(
@@ -425,7 +521,7 @@ async def _run_daily_check(bot) -> None:
 
 async def on_startup(application: Application) -> None:
     """Called once when the bot starts. Load authorized users and their Excel files."""
-    global _scheduler, _authorized_users
+    global _scheduler, _authorized_users, _chat_id_registry
 
     # Migrate legacy single-user files for admin if they exist
     if ADMIN_TELEGRAM_ID:
@@ -447,6 +543,10 @@ async def on_startup(application: Application) -> None:
     _authorized_users = _load_authorized_users()
     logger.info("Startup: %d authorized user(s) loaded.", len(_authorized_users))
 
+    # Load chat ID registry
+    _chat_id_registry = _load_chat_id_registry()
+    logger.info("Startup: %d registered username(s) in chat ID registry.", len(_chat_id_registry))
+
     # Load each authorized user's Excel file (if it exists)
     for user_id in _authorized_users:
         excel_path = _user_excel_path(user_id)
@@ -454,9 +554,11 @@ async def on_startup(application: Application) -> None:
             try:
                 records, invalid, _ = excel_handler.load_excel(str(excel_path))
                 _user_records[user_id] = records
+                # Auto-resolve chat_ids from registry
+                resolved = _resolve_chat_ids(records)
                 logger.info(
-                    "Startup: loaded %d records for user %s (%d invalid).",
-                    len(records), user_id, invalid,
+                    "Startup: loaded %d records for user %s (%d invalid, %d chat_ids resolved).",
+                    len(records), user_id, invalid, resolved,
                 )
             except Exception as exc:
                 logger.warning(
