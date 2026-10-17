@@ -80,6 +80,7 @@ def load_excel(file_path: str) -> tuple[list[StudentRecord], int, list[str]]:
     valid_records: list[StudentRecord] = []
     error_messages: list[str] = []
     invalid_count = 0
+    seen_entries: set[tuple[str, str]] = set()
 
     for row_num, row in enumerate(rows[1:], start=2):
         # Skip entirely blank rows
@@ -92,7 +93,20 @@ def load_excel(file_path: str) -> tuple[list[StudentRecord], int, list[str]]:
             invalid_count += 1
             error_messages.extend(errors)
             logger.warning("Row %d skipped: %s", row_num, "; ".join(errors))
-        else:
+        elif record:
+            # Duplicate row safeguard: skip identical student + due date entries in same sheet
+            uname = record.get("telegram_username", "").lower()
+            due_str = str(record.get("due_date"))
+            dedup_tuple = (uname, due_str)
+            if dedup_tuple in seen_entries:
+                logger.warning(
+                    "Row %d skipped: duplicate entry for %s with due_date %s",
+                    row_num,
+                    record.get("telegram_username"),
+                    record.get("due_date"),
+                )
+                continue
+            seen_entries.add(dedup_tuple)
             valid_records.append(record)
 
     logger.info(
@@ -178,6 +192,12 @@ def _parse_row(
     chat_id_raw = _get_cell(row, col_index, "telegram_chat_id")
     telegram_chat_id = _parse_chat_id(chat_id_raw, row_num, errors)
 
+    # --- start_date (optional) ---
+    start_date_raw = _get_cell(row, col_index, "start_date") or _get_cell(
+        row, col_index, "class_start_date"
+    )
+    start_date = _parse_date(start_date_raw, row_num, errors) if start_date_raw else None
+
     if errors:
         return errors, None
 
@@ -192,6 +212,7 @@ def _parse_row(
         "student_name": student_name,
         "due_date": due_date,
         "telegram_chat_id": telegram_chat_id,
+        "start_date": start_date,
     }
     return [], record
 
@@ -291,3 +312,52 @@ def _parse_chat_id(
             f"Row {row_num}: 'telegram_chat_id' must be a number. Got: {raw!r}"
         )
         return None
+
+
+def save_excel(records: list[StudentRecord], file_path: str) -> None:
+    """
+    Save student records to an Excel (.xlsx) file.
+    """
+    path = Path(file_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Students"
+
+    headers = [
+        "telegram_username",
+        "student_name",
+        "due_date",
+        "telegram_chat_id",
+        "start_date",
+    ]
+    ws.append(headers)
+
+    for rec in records:
+        due = rec.get("due_date")
+        if isinstance(due, (datetime.date, datetime.datetime)):
+            due_str = due.strftime("%Y-%m-%d")
+        else:
+            due_str = str(due) if due is not None else ""
+
+        start = rec.get("start_date")
+        if isinstance(start, (datetime.date, datetime.datetime)):
+            start_str = start.strftime("%Y-%m-%d")
+        else:
+            start_str = str(start) if start is not None else ""
+
+        ws.append(
+            [
+                rec.get("telegram_username", ""),
+                rec.get("student_name", ""),
+                due_str,
+                rec.get("telegram_chat_id") if rec.get("telegram_chat_id") is not None else "",
+                start_str,
+            ]
+        )
+
+    wb.save(str(path))
+    wb.close()
+    logger.info("Saved %d records to %s", len(records), path)
+

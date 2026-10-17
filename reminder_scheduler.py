@@ -11,6 +11,7 @@ Responsibilities:
   - Report failures to admin
 """
 
+import asyncio
 import datetime
 import json
 import logging
@@ -25,56 +26,80 @@ from telegram.error import TelegramError
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
+# Concurrency & Deduplication Guards
+# ---------------------------------------------------------------------------
+_daily_check_lock = asyncio.Lock()
+_memory_sent_cache: dict[str, set[str]] = {}
+
+# ---------------------------------------------------------------------------
 # Constants (overridden by env vars via bot.py)
 # ---------------------------------------------------------------------------
 SENT_REMINDERS_PATH = Path("data/sent_reminders.json")
 
 REMINDER_TEMPLATE = """\
-Hello {student_name}! 👋
+Hi! 
 
-This is a friendly reminder that your payment deadline is {due_date}, which is {days} days away.
+Just a friendly reminder that since we started our class on {start_date_en} , the fee for this month was due on {due_date_en}.
 
-Please make your payment before the deadline.
+No worries at all, just a gentle reminder.
 
-If you have already paid, please contact your class administrator.
+Take your time! 🤍
 
-Thank you!\
+Hello, ချယ်ချယ်တို့ အတန်းလေးက {start_date_mm} ရက်နေ့က စတာမို့ {due_date_mm} ရက်နေ့ကျ သင်တန်းကြေးလေး ပြန်သွင်းပေးရပါမယ်ရှင့်
+
+မလောပါဘူးရှင် remind လုပ်တာပါနော်🤍\
 """
 
 # ---------------------------------------------------------------------------
-# Sent Reminders JSON persistence
+# Sent Reminders JSON persistence (Atomic + Cached)
 # ---------------------------------------------------------------------------
 
 
 def load_sent_reminders(path: Path = SENT_REMINDERS_PATH) -> set[str]:
     """
     Load already-sent reminder keys from JSON.
-    Returns an empty set if the file doesn't exist or is malformed.
+    Merges with in-memory cache to guarantee zero loss across calls.
+    Returns an empty set if the file doesn't exist and cache is empty.
     """
+    key_path = str(path.resolve()) if path.is_absolute() else str(path)
+    cached = _memory_sent_cache.get(key_path, set())
+
     if not path.exists():
-        return set()
+        return set(cached)
+
     try:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
         if isinstance(data, list):
-            return set(data)
-        logger.warning("sent_reminders.json has unexpected format; resetting.")
-        return set()
+            file_keys = set(data)
+            merged = file_keys | cached
+            _memory_sent_cache[key_path] = merged
+            return set(merged)
+        logger.warning("%s has unexpected format; preserving cache.", path)
+        return set(cached)
     except (json.JSONDecodeError, OSError) as exc:
-        logger.warning("Could not load sent_reminders.json: %s", exc)
-        return set()
+        logger.warning("Could not load %s: %s (preserving cache)", path, exc)
+        return set(cached)
 
 
 def save_sent_reminders(keys: set[str], path: Path = SENT_REMINDERS_PATH) -> None:
     """
-    Save sent reminder keys to JSON (sorted list for readability).
+    Save sent reminder keys to JSON atomically using temporary file + os.replace.
+    Guarantees no partial writes or zero-byte corrupted files.
     """
+    key_path = str(path.resolve()) if path.is_absolute() else str(path)
+    _memory_sent_cache[key_path] = set(keys)
+
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "w", encoding="utf-8") as f:
+        temp_path = path.with_suffix(f".tmp.{os.getpid()}")
+        with open(temp_path, "w", encoding="utf-8") as f:
             json.dump(sorted(keys), f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temp_path, path)
     except OSError as exc:
-        logger.error("Could not save sent_reminders.json: %s", exc)
+        logger.error("Could not save %s atomically: %s", path, exc)
 
 
 # ---------------------------------------------------------------------------
@@ -82,14 +107,44 @@ def save_sent_reminders(keys: set[str], path: Path = SENT_REMINDERS_PATH) -> Non
 # ---------------------------------------------------------------------------
 
 
+def _format_ordinal_date(d: datetime.date) -> str:
+    """Format date as e.g. 'July 14th', 'October 14th', 'November 1st'."""
+    day = d.day
+    if 11 <= (day % 100) <= 13:
+        suffix = "th"
+    else:
+        suffix = {1: "st", 2: "nd", 3: "rd"}.get(day % 10, "th")
+    return f"{d.strftime('%B')} {day}{suffix}"
+
+
+def _format_myanmar_date(d: datetime.date) -> str:
+    """Format date for Myanmar text e.g. 'July 14', 'October 14'."""
+    return f"{d.strftime('%B')} {d.day}"
+
+
 def format_reminder_message(
-    student_name: str, due_date: datetime.date, reminder_days: int
+    student_name: str,
+    due_date: datetime.date,
+    reminder_days: int = 5,
+    start_date: Optional[datetime.date] = None,
 ) -> str:
     """Format the reminder message from the template."""
-    due_date_str = due_date.strftime("%B %d, %Y")  # e.g. "November 05, 2026"
+    if start_date is None:
+        # Default to July 14th of the relevant academic cycle
+        start_year = due_date.year if due_date.month >= 7 else due_date.year - 1
+        start_date = datetime.date(start_year, 7, 14)
+
+    start_date_en = _format_ordinal_date(start_date)
+    due_date_en = _format_ordinal_date(due_date)
+    start_date_mm = _format_myanmar_date(start_date)
+    due_date_mm = _format_myanmar_date(due_date)
+
     return REMINDER_TEMPLATE.format(
         student_name=student_name,
-        due_date=due_date_str,
+        start_date_en=start_date_en,
+        due_date_en=due_date_en,
+        start_date_mm=start_date_mm,
+        due_date_mm=due_date_mm,
         days=reminder_days,
     )
 
@@ -107,7 +162,7 @@ def get_upcoming_reminders(
 ) -> list[dict]:
     """
     Return the next `n` records sorted by days_until_due (ascending),
-    where days_until_due > 0.  Used for the /status command display.
+    where days_until_due >= 0. Used for the /status command display.
     """
     tz = ZoneInfo(timezone_str)
     today = datetime.datetime.now(tz).date()
@@ -118,7 +173,7 @@ def get_upcoming_reminders(
         if not due_date:
             continue
         days_until = (due_date - today).days
-        if days_until > 0:
+        if days_until >= 0:
             upcoming.append({**rec, "days_until_due": days_until})
 
     upcoming.sort(key=lambda r: r["days_until_due"])
@@ -138,7 +193,7 @@ async def daily_check(
     reminder_days: int = 5,
     sent_reminders_path: Path = SENT_REMINDERS_PATH,
     admin_chat_id: Optional[int] = None,
-) -> None:
+) -> dict:
     """
     Main daily reminder check.
 
@@ -146,79 +201,111 @@ async def daily_check(
       - Skip if no chat_id (notify owner/admin).
       - Skip if due_date already passed.
       - If days_until_due == reminder_days and not already sent → send + save key.
+
+    Returns:
+      dict with detailed breakdown of the check results:
+      {
+        "today": date,
+        "reminder_days": int,
+        "total_records": int,
+        "sent": list[dict],
+        "already_sent": list[dict],
+        "not_due": list[dict],
+        "past_due": list[dict],
+        "no_chat_id": list[dict],
+        "failed": list[tuple[dict, str]],
+      }
     """
     notify_chat_id = owner_chat_id if owner_chat_id is not None else admin_chat_id
     tz = ZoneInfo(timezone_str)
     today = datetime.datetime.now(tz).date()
 
-    sent_keys = load_sent_reminders(sent_reminders_path)
-    newly_sent: list[str] = []
-    skipped_no_chat_id: list[dict] = []
-    failed: list[tuple[dict, str]] = []
+    async with _daily_check_lock:
+        sent_keys = load_sent_reminders(sent_reminders_path)
+        newly_sent: list[str] = []
+        sent_records: list[dict] = []
+        already_sent_records: list[dict] = []
+        not_due_records: list[dict] = []
+        past_records: list[dict] = []
+        skipped_no_chat_id: list[dict] = []
+        failed: list[tuple[dict, str]] = []
+        seen_in_run: set[str] = set()
 
-    logger.info(
-        "Daily check started. Today: %s. Records: %d. Loaded sent keys: %d",
-        today,
-        len(records),
-        len(sent_keys),
-    )
+        logger.info(
+            "Daily check started. Today: %s. Records: %d. Loaded sent keys: %d",
+            today,
+            len(records),
+            len(sent_keys),
+        )
 
-    for rec in records:
-        username: str = rec.get("telegram_username", "Unknown")
-        student_name: str = rec.get("student_name", username)
-        due_date: Optional[datetime.date] = rec.get("due_date")
-        chat_id: Optional[int] = rec.get("telegram_chat_id")
+        for rec in records:
+            username: str = rec.get("telegram_username", "Unknown")
+            student_name: str = rec.get("student_name", username)
+            due_date: Optional[datetime.date] = rec.get("due_date")
+            chat_id: Optional[int] = rec.get("telegram_chat_id")
 
-        # Skip if no due_date (shouldn't happen after validation, but be safe)
-        if due_date is None:
-            logger.warning("Skipping %s: no due_date.", username)
-            continue
+            # Skip if no due_date (shouldn't happen after validation, but be safe)
+            if due_date is None:
+                logger.warning("Skipping %s: no due_date.", username)
+                continue
 
-        # Skip past due dates
-        if due_date < today:
-            continue
+            # Skip past due dates
+            if due_date < today:
+                past_records.append(rec)
+                continue
 
-        days_until_due = (due_date - today).days
+            days_until_due = (due_date - today).days
 
-        # Only send when exactly REMINDER_DAYS_BEFORE
-        if days_until_due != reminder_days:
-            continue
+            # Only send when exactly REMINDER_DAYS_BEFORE
+            if days_until_due != reminder_days:
+                not_due_records.append({**rec, "days_until_due": days_until_due})
+                continue
 
-        # No chat_id → report to owner/admin, skip
-        if chat_id is None:
-            skipped_no_chat_id.append(rec)
-            logger.warning(
-                "No chat_id for %s (due %s) — cannot send reminder.", username, due_date
+            # No chat_id → report to owner/admin, skip
+            if chat_id is None:
+                skipped_no_chat_id.append(rec)
+                logger.warning(
+                    "No chat_id for %s (due %s) — cannot send reminder.", username, due_date
+                )
+                continue
+
+            # Canonical reminder key
+            due_date_iso = (
+                due_date.strftime("%Y-%m-%d")
+                if isinstance(due_date, (datetime.date, datetime.datetime))
+                else str(due_date).strip()
             )
-            continue
+            reminder_key = f"{chat_id}:{due_date_iso}"
 
-        reminder_key = f"{chat_id}:{due_date}"
+            # Duplicate prevention (both from persistent history and earlier rows in this run)
+            if reminder_key in sent_keys or reminder_key in seen_in_run:
+                already_sent_records.append(rec)
+                logger.info("Already sent/processed reminder for key %s — skipping.", reminder_key)
+                continue
 
-        # Duplicate prevention
-        if reminder_key in sent_keys:
-            logger.info("Already sent reminder for key %s — skipping.", reminder_key)
-            continue
+            seen_in_run.add(reminder_key)
 
-        # Send the reminder
-        message = format_reminder_message(student_name, due_date, reminder_days)
-        try:
-            await bot.send_message(chat_id=chat_id, text=message)
-            sent_keys.add(reminder_key)
-            newly_sent.append(reminder_key)
-            logger.info("Reminder sent to %s (chat_id=%s).", username, chat_id)
-        except TelegramError as exc:
-            failed.append((rec, str(exc)))
-            logger.error(
-                "Failed to send reminder to %s (chat_id=%s): %s",
-                username,
-                chat_id,
-                exc,
+            # Send the reminder
+            start_date: Optional[datetime.date] = rec.get("start_date")
+            message = format_reminder_message(
+                student_name, due_date, reminder_days, start_date=start_date
             )
-
-    # Persist after all sends
-    if newly_sent:
-        save_sent_reminders(sent_keys, sent_reminders_path)
-        logger.info("Saved %d new reminder keys.", len(newly_sent))
+            try:
+                await bot.send_message(chat_id=chat_id, text=message)
+                sent_keys.add(reminder_key)
+                newly_sent.append(reminder_key)
+                sent_records.append(rec)
+                # Immediately persist atomically to disk so no interruption can ever cause duplication
+                save_sent_reminders(sent_keys, sent_reminders_path)
+                logger.info("Reminder sent & persisted for %s (chat_id=%s, key=%s).", username, chat_id, reminder_key)
+            except TelegramError as exc:
+                failed.append((rec, str(exc)))
+                logger.error(
+                    "Failed to send reminder to %s (chat_id=%s): %s",
+                    username,
+                    chat_id,
+                    exc,
+                )
 
     # Report skipped (no chat_id) to owner
     if skipped_no_chat_id and notify_chat_id:
@@ -246,6 +333,18 @@ async def daily_check(
         len(skipped_no_chat_id),
         len(failed),
     )
+
+    return {
+        "today": today,
+        "reminder_days": reminder_days,
+        "total_records": len(records),
+        "sent": sent_records,
+        "already_sent": already_sent_records,
+        "not_due": not_due_records,
+        "past_due": past_records,
+        "no_chat_id": skipped_no_chat_id,
+        "failed": failed,
+    }
 
 
 # ---------------------------------------------------------------------------

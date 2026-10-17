@@ -42,9 +42,17 @@ A simple Telegram bot supporting multiple independent users (e.g. teachers or cl
    - Reminders are sent 5 days before deadlines (or today in testing mode).
    - Warnings (unregistered students, send failures) go to the file owner (`owner_chat_id`).
 
-6. **Commands:**
-   - `/start` or `/help`: Welcome message, Chat ID, and loaded record count (or student registration / teacher auth prompt).
-   - `/status`: Shows current user's loaded student count and next 5 upcoming reminders (plus authorized users count for admin).
+6. **Commands & Menu UI:**
+   - `/start`, `/help`, or `/menu`: Interactive Control Panel with inline keyboard navigation:
+     - `[📊 Roster & Status]` — View loaded count, Chat ID linkage, and next 5 upcoming reminders.
+     - `[⚙️ Scheduler]` — Live countdown, check interval, and full schedule queue.
+     - `[📨 Check & Send Now]` — Immediately evaluate and send due reminders.
+     - `[🗑️ Delete Reminders]` — Interactive list with pagination and one-tap schedule deletion (persisted back to `students.xlsx`).
+     - `[📜 Sent History]` — View history and clear sent history to re-test.
+     - `[🔄 Refresh Menu]` — Live refresh of timer countdown and student counters.
+   - `/delete` or `/removereminder`: Directly opens the interactive reminder deletion UI.
+   - `/status`, `/scheduler`, `/check`, `/history`, `/clearsent`: Direct text shortcuts that also feature the interactive menu buttons.
+   - `/users`: (Admin only) View authorized teachers and auto-captured student registry stats.
 
 ---
 
@@ -106,11 +114,14 @@ Ariel's Bot/
 - Pure Python + openpyxl. No Telegram dependency.
 - Reads `.xlsx`, maps columns case-insensitively, validates each row.
 - Required columns: `telegram_username`, `due_date`.
-- Optional columns: `student_name` (fallback to username), `telegram_chat_id` (optional, auto-resolved if missing).
+- Optional columns: `student_name` (fallback to username), `telegram_chat_id` (auto-resolved if missing), `start_date` / `class_start_date` (defaults to July 14th if omitted).
 - Returns `(valid_records, invalid_count, error_messages)`.
 - Skips blank rows silently. Reports bad rows without crashing.
 
 ### `reminder_scheduler.py` — Daily Check + Send Logic
+- Formats dynamic bilingual reminder messages (English + Myanmar):
+  - English: `"Hi!\n\nJust a friendly reminder that since we started our class on {start_date_en} , the fee for this month was due on {due_date_en}.\n\nNo worries at all, just a gentle reminder.\n\nTake your time! 🤍\n\nHello, ချယ်ချယ်တို့ အတန်းလေးက {start_date_mm} ရက်နေ့က စတာမို့ {due_date_mm} ရက်နေ့ကျ သင်တန်းကြေးလေး ပြန်သွင်းပေးရပါမယ်ရှင့်\n\nမလောပါဘူးရှင် remind လုပ်တာပါနော်🤍"`
+  - Automatically formats ordinal dates (e.g. `July 14th`, `October 14th`) and Myanmar date labels (`July 14 ရက်နေ့`, `October 14 ရက်နေ့`).
 - `daily_check(bot, records, owner_chat_id, ...)`:
   - For each record: skip past dates, skip if `days_until_due != reminder_days`.
   - If no `chat_id` → notify `owner_chat_id`, skip.
@@ -121,13 +132,16 @@ Ariel's Bot/
 - `load_sent_reminders()` / `save_sent_reminders()` — JSON persistence for dedup keys.
 
 ### `smoke_test.py` — Offline Tests
-- 10 test suites (30 assertions) covering:
+- 13 test suites (50 assertions) covering:
   - Valid rows, mixed valid/invalid, blank row skipping
   - Case-insensitive headers, missing chat_id handling
   - Date math, duplicate prevention
   - Mocked Telegram sending & error reporting
   - Multi-user isolation (separate files and histories)
   - Authorized user persistence & admin auto-authorization
+  - Dynamic bilingual reminder message formatting
+  - `save_excel` serialization and schedule deletion persistence
+  - Strict duplicate impossibility (in-run duplicates, 3x concurrent check race conditions, atomic persistence)
 - Run with: `.\venv\Scripts\python.exe smoke_test.py`
 
 ---

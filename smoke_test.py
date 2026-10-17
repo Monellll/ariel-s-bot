@@ -399,6 +399,149 @@ with tempfile.TemporaryDirectory() as tmpdir:
     check("Total authorized count is 2", len(loaded_users) == 2)
 
 # ===========================================================================
+# Test 11: Dynamic reminder message formatting
+# ===========================================================================
+print("\n--- Test 11: Dynamic reminder message formatting ---")
+msg_default = reminder_scheduler.format_reminder_message(
+    student_name="Ariel",
+    due_date=datetime.date(2026, 10, 14),
+    reminder_days=5,
+)
+check("Message contains dynamic July 14th default", "July 14th" in msg_default)
+check("Message contains dynamic October 14th", "October 14th" in msg_default)
+check("Message contains Myanmar July 14", "July 14 ရက်နေ့" in msg_default)
+check("Message contains Myanmar October 14", "October 14 ရက်နေ့" in msg_default)
+check("Message contains gentle reminder text", "No worries at all, just a gentle reminder." in msg_default)
+check("Message contains Myanmar polite closing", "မလောပါဘူးရှင် remind လုပ်တာပါနော်🤍" in msg_default)
+
+# Custom start date
+msg_custom = reminder_scheduler.format_reminder_message(
+    student_name="Bao",
+    due_date=datetime.date(2026, 11, 21),
+    reminder_days=5,
+    start_date=datetime.date(2026, 8, 1),
+)
+check("Custom start date ordinal formatted", "August 1st" in msg_custom)
+check("Custom due date ordinal formatted", "November 21st" in msg_custom)
+check("Custom Myanmar start date formatted", "August 1 ရက်နေ့" in msg_custom)
+check("Custom Myanmar due date formatted", "November 21 ရက်နေ့" in msg_custom)
+
+# ===========================================================================
+# Test 12: save_excel and delete persistence
+# ===========================================================================
+print("\n--- Test 12: save_excel and delete persistence ---")
+with tempfile.TemporaryDirectory() as tmpdir:
+    test_xlsx = Path(tmpdir) / "students.xlsx"
+    records_to_save = [
+        {
+            "telegram_username": "@student1",
+            "student_name": "Student One",
+            "due_date": datetime.date(2026, 11, 1),
+            "telegram_chat_id": 111111,
+            "start_date": datetime.date(2026, 7, 14),
+        },
+        {
+            "telegram_username": "@student2",
+            "student_name": "Student Two",
+            "due_date": datetime.date(2026, 11, 2),
+            "telegram_chat_id": 222222,
+            "start_date": None,
+        },
+    ]
+
+    # Save initial records
+    excel_handler.save_excel(records_to_save, str(test_xlsx))
+    check("Excel file created by save_excel", test_xlsx.exists())
+
+    # Reload and verify
+    loaded, invalids, errs = excel_handler.load_excel(str(test_xlsx))
+    check("Reloaded records count matches", len(loaded) == 2, f"got {len(loaded)}")
+    check("Student 1 username preserved", loaded[0]["telegram_username"] == "@student1")
+    check("Student 1 chat_id preserved", loaded[0]["telegram_chat_id"] == 111111)
+
+    # Delete 1 record and re-save
+    loaded.pop(0)
+    excel_handler.save_excel(loaded, str(test_xlsx))
+
+    # Reload again
+    reloaded, _, _ = excel_handler.load_excel(str(test_xlsx))
+    check("Reloaded count after delete is 1", len(reloaded) == 1, f"got {len(reloaded)}")
+    check("Remaining student is student2", reloaded[0]["telegram_username"] == "@student2")
+
+# ===========================================================================
+# Test 13: Strict duplicate impossibility & concurrency protection
+# ===========================================================================
+print("\n--- Test 13: Strict duplicate impossibility & concurrency protection ---")
+async def run_concurrency_test():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        json_path = Path(tmpdir) / "sent_reminders.json"
+        target_date = datetime.date(2026, 10, 22)
+
+        # Roster with duplicate rows of the exact same student
+        dup_records = [
+            {
+                "telegram_username": "@dupstudent",
+                "student_name": "Dup Student",
+                "due_date": target_date,
+                "telegram_chat_id": 555555,
+            },
+            {
+                "telegram_username": "@dupstudent",
+                "student_name": "Dup Student",
+                "due_date": target_date,
+                "telegram_chat_id": 555555,
+            },
+        ]
+
+        mock_bot = AsyncMock()
+        mock_bot.send_message = AsyncMock()
+
+        # Execute 3 concurrent daily_check calls simultaneously
+        results = await asyncio.gather(
+            reminder_scheduler.daily_check(
+                bot=mock_bot,
+                records=dup_records,
+                admin_chat_id=12345,
+                timezone_str="Asia/Yangon",
+                reminder_days=5,
+                sent_reminders_path=json_path,
+            ),
+            reminder_scheduler.daily_check(
+                bot=mock_bot,
+                records=dup_records,
+                admin_chat_id=12345,
+                timezone_str="Asia/Yangon",
+                reminder_days=5,
+                sent_reminders_path=json_path,
+            ),
+            reminder_scheduler.daily_check(
+                bot=mock_bot,
+                records=dup_records,
+                admin_chat_id=12345,
+                timezone_str="Asia/Yangon",
+                reminder_days=5,
+                sent_reminders_path=json_path,
+            ),
+        )
+
+        # Count total send_message calls for student 555555
+        calls = mock_bot.send_message.call_args_list
+        student_calls = [
+            c for c in calls if (c.kwargs.get("chat_id") == 555555 or (c.args and c.args[0] == 555555))
+        ]
+        check(
+            "Exactly 1 reminder sent across 3 concurrent checks and duplicate rows",
+            len(student_calls) == 1,
+            f"got {len(student_calls)} calls (expected 1)",
+        )
+
+        # Confirm persisted immediately
+        saved_keys = reminder_scheduler.load_sent_reminders(json_path)
+        check("Key is persisted in sent_reminders.json", "555555:2026-10-22" in saved_keys)
+
+asyncio.run(run_concurrency_test())
+
+# ===========================================================================
 # Summary
 # ===========================================================================
 print("\n" + "=" * 50)

@@ -16,6 +16,7 @@ Usage:
     python bot.py
 """
 
+import datetime
 import json
 import logging
 import os
@@ -27,10 +28,11 @@ from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from dotenv import load_dotenv
-from telegram import Update
-from telegram.error import TelegramError
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.error import BadRequest, TelegramError
 from telegram.ext import (
     Application,
+    CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
     MessageHandler,
@@ -240,8 +242,334 @@ def _is_authorized(update: Update) -> bool:
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Menu UI & Helper Functions
+# ---------------------------------------------------------------------------
+
+PAGE_SIZE = 6
+
+
+def _build_main_menu_keyboard(is_admin: bool = False) -> InlineKeyboardMarkup:
+    """Build the primary navigation keyboard for the bot."""
+    buttons = [
+        [
+            InlineKeyboardButton("📊 Roster & Status", callback_data="menu:status"),
+            InlineKeyboardButton("⚙️ Scheduler", callback_data="menu:scheduler"),
+        ],
+        [
+            InlineKeyboardButton("📨 Check & Send Now", callback_data="menu:check"),
+            InlineKeyboardButton("🗑️ Delete Reminders", callback_data="menu:delete_list:0"),
+        ],
+        [
+            InlineKeyboardButton("📜 Sent History", callback_data="menu:history"),
+            InlineKeyboardButton("🔄 Refresh Menu", callback_data="menu:home"),
+        ],
+    ]
+    if is_admin:
+        buttons.append(
+            [InlineKeyboardButton("👥 Admin: Users & Registry", callback_data="menu:users")]
+        )
+    return InlineKeyboardMarkup(buttons)
+
+
+def _get_home_text(user_id: int, user_name: str) -> str:
+    """Return the dashboard summary text for the main menu."""
+    record_count = len(_user_records.get(user_id, []))
+    tz = ZoneInfo(TIMEZONE)
+    now = datetime.datetime.now(tz)
+    now_str = now.strftime("%Y-%m-%d %H:%M")
+
+    job = _scheduler.get_job("daily_reminder_check") if _scheduler else None
+    countdown_str = "None"
+    if job and job.next_run_time:
+        diff = job.next_run_time.astimezone(tz) - now
+        tot = max(0, int(diff.total_seconds()))
+        m, s = divmod(tot, 60)
+        h, m = divmod(m, 60)
+        countdown_parts = []
+        if h > 0:
+            countdown_parts.append(f"{h}h")
+        if m > 0:
+            countdown_parts.append(f"{m}m")
+        countdown_parts.append(f"{s}s")
+        countdown_str = " ".join(countdown_parts)
+
+    return (
+        f"👋 *Welcome, {user_name}!*\n\n"
+        "🎯 *Payment Reminder Control Panel*\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"📊 *Students Loaded:* `{record_count}`\n"
+        f"⏱️ *Bot Time:* `{now_str}` (`{TIMEZONE}`)\n"
+        f"⚙️ *Next Timer Check:* ⏳ `in {countdown_str}`\n"
+        f"🎯 *Reminder Offset:* `{REMINDER_DAYS_BEFORE} day(s)`\n"
+        "━━━━━━━━━━━━━━━━━━━━\n\n"
+        "📤 *Tip:* Send any `.xlsx` file anytime to update your student roster.\n"
+        "Choose an action below:"
+    )
+
+
+def _render_status_text(user_id: int) -> str:
+    """Format roster status summary."""
+    records = _user_records.get(user_id, [])
+    total = len(records)
+    _resolve_chat_ids(records)
+    with_chat_id = sum(1 for r in records if r.get("telegram_chat_id"))
+    without_chat_id = total - with_chat_id
+
+    now = datetime.datetime.now(ZoneInfo(TIMEZONE))
+    now_str = now.strftime("%Y-%m-%d %H:%M")
+
+    lines = [
+        "📊 *Your Roster & Status*",
+        f"• Total Loaded: `{total}` student(s)",
+        f"• ✅ Chat ID Linked: `{with_chat_id}`",
+        f"• ⚠️ Missing Chat ID: `{without_chat_id}`",
+        f"• ⏱️ Bot Time: `{now_str}` (`{TIMEZONE}`)",
+        f"• 🎯 Target Offset: `REMINDER_DAYS_BEFORE = {REMINDER_DAYS_BEFORE}` day(s)",
+    ]
+
+    if total == 0:
+        lines.append("\n_No Excel file loaded yet. Upload a .xlsx file to begin._")
+    else:
+        upcoming = reminder_scheduler.get_upcoming_reminders(
+            records, TIMEZONE, REMINDER_DAYS_BEFORE, n=5
+        )
+        if upcoming:
+            lines.append("\n📅 *Next upcoming reminders:*")
+            for rec in upcoming:
+                days = rec["days_until_due"]
+                due_label = "today!" if days == 0 else f"in {days} day(s)"
+                uname = rec.get("telegram_username", "")
+                sname = rec.get("student_name", uname)
+                lines.append(
+                    f"• {sname} (`{uname}`) — due `{rec['due_date']}` ({due_label})"
+                )
+        else:
+            lines.append("\n_No upcoming reminders in the next period._")
+
+    return "\n".join(lines)
+
+
+def _render_scheduler_text(user_id: int) -> str:
+    """Format scheduler engine state and active schedule data."""
+    tz = ZoneInfo(TIMEZONE)
+    now = datetime.datetime.now(tz)
+    today = now.date()
+    now_str = now.strftime("%Y-%m-%d %H:%M:%S")
+
+    job = _scheduler.get_job("daily_reminder_check") if _scheduler else None
+    is_running = _scheduler is not None and _scheduler.running
+
+    lines = [
+        "⚙️ *Scheduler Engine*",
+        f"• Status: {'🟢 Active' if is_running else '🔴 Stopped'}",
+        f"• Current Time: `{now_str}` (`{TIMEZONE}`)",
+        f"• Target Offset: `REMINDER_DAYS_BEFORE = {REMINDER_DAYS_BEFORE}` day(s)",
+    ]
+
+    if job and job.next_run_time:
+        next_run = job.next_run_time.astimezone(tz)
+        diff = next_run - now
+        total_seconds = max(0, int(diff.total_seconds()))
+        minutes, seconds = divmod(total_seconds, 60)
+        hours, minutes = divmod(minutes, 60)
+
+        countdown = []
+        if hours > 0:
+            countdown.append(f"{hours}h")
+        if minutes > 0:
+            countdown.append(f"{minutes}m")
+        countdown.append(f"{seconds}s")
+        countdown_str = " ".join(countdown)
+
+        trigger_desc = str(job.trigger)
+        if "interval" in trigger_desc.lower():
+            mode_desc = "`Interval (every 3 minutes)` *(Testing Mode)*"
+        else:
+            mode_desc = f"`Cron (Daily at {REMINDER_HOUR:02d}:{REMINDER_MINUTE:02d})` *(Production)*"
+
+        lines += [
+            f"• Schedule Mode: {mode_desc}",
+            f"• Next Check: `{next_run.strftime('%Y-%m-%d %H:%M:%S')}`",
+            f"• Countdown: ⏳ *in {countdown_str}*",
+        ]
+    else:
+        lines.append("• Next Check: _None scheduled_")
+
+    lines.append("\n📋 *Active Schedule Data*")
+    records = _user_records.get(user_id, [])
+    _resolve_chat_ids(records)
+
+    if not records:
+        lines.append(
+            "_No roster loaded yet. Upload an Excel (.xlsx) file to view schedule data._"
+        )
+    else:
+        sent_path = _user_sent_reminders_path(user_id)
+        sent_keys = reminder_scheduler.load_sent_reminders(sent_path)
+
+        due_on_target: list[dict] = []
+        future_scheduled: list[dict] = []
+        already_sent_count = 0
+        missing_chat_id_count = 0
+
+        for r in records:
+            due = r.get("due_date")
+            cid = r.get("telegram_chat_id")
+            if not cid:
+                missing_chat_id_count += 1
+            if due:
+                key = f"{cid}:{due}"
+                if key in sent_keys:
+                    already_sent_count += 1
+                days = (due - today).days
+                if days == REMINDER_DAYS_BEFORE:
+                    due_on_target.append(
+                        {**r, "days": days, "is_sent": key in sent_keys}
+                    )
+                elif days > REMINDER_DAYS_BEFORE:
+                    future_scheduled.append(
+                        {**r, "days": days, "is_sent": key in sent_keys}
+                    )
+
+        lines.append(f"• Total Roster: {len(records)} student(s)")
+        lines.append(
+            f"• Already Sent: {already_sent_count} | Missing Chat ID: {missing_chat_id_count}"
+        )
+
+        lines.append(f"\n🎯 *Next Check Queue (due in {REMINDER_DAYS_BEFORE}d):*")
+        if not due_on_target:
+            lines.append("  _None due for the next check._")
+        else:
+            for r in due_on_target:
+                uname = r.get("telegram_username", "")
+                sname = r.get("student_name", uname)
+                cid = r.get("telegram_chat_id")
+                status = (
+                    "✅ Sent"
+                    if r["is_sent"]
+                    else ("⏳ Pending Send" if cid else "⚠️ Missing Chat ID")
+                )
+                lines.append(
+                    f"  • `{uname}` ({sname}) — `{r.get('due_date')}` [{status}]"
+                )
+
+        future_scheduled.sort(key=lambda x: x["days"])
+        lines.append("\n📅 *Upcoming Scheduled Reminders:*")
+        if not future_scheduled:
+            lines.append("  _No future reminders beyond the current target offset._")
+        else:
+            for r in future_scheduled[:10]:
+                uname = r.get("telegram_username", "")
+                sname = r.get("student_name", uname)
+                cid = r.get("telegram_chat_id")
+                cid_status = "✅ Linked" if cid else "⚠️ No Chat ID"
+                lines.append(
+                    f"  • `{uname}` ({sname}) — `{r.get('due_date')}` (in {r['days']}d) [{cid_status}]"
+                )
+            if len(future_scheduled) > 10:
+                lines.append(
+                    f"  _… and {len(future_scheduled) - 10} more upcoming._"
+                )
+
+    return "\n".join(lines)
+
+
+def _render_history_text(user_id: int) -> str:
+    """Format sent reminder history."""
+    path = _user_sent_reminders_path(user_id)
+    sent_keys = reminder_scheduler.load_sent_reminders(path)
+
+    lines = [
+        "📜 *Sent Reminders History*",
+        f"Total reminders recorded: `{len(sent_keys)}`",
+    ]
+
+    if not sent_keys:
+        lines.append("\n_No reminders have been recorded as sent yet._")
+    else:
+        lines.append("\n*Recent entries (`chat_id:due_date`):*")
+        for key in sorted(sent_keys, reverse=True)[:15]:
+            lines.append(f"• `{key}`")
+        if len(sent_keys) > 15:
+            lines.append(f"… and {len(sent_keys) - 15} more.")
+
+    return "\n".join(lines)
+
+
+def _render_delete_list(
+    user_id: int, page: int = 0
+) -> tuple[str, InlineKeyboardMarkup]:
+    """Render list of reminder schedules with per-item delete buttons."""
+    records = _user_records.get(user_id, [])
+    if not records:
+        text = (
+            "🗑️ *Delete Reminder Schedule*\n\n"
+            "_No active student reminders found in your roster._\n"
+            "Upload an Excel (.xlsx) file to add student reminders."
+        )
+        keyboard = InlineKeyboardMarkup(
+            [[InlineKeyboardButton("⬅️ Back to Menu", callback_data="menu:home")]]
+        )
+        return text, keyboard
+
+    total_records = len(records)
+    total_pages = max(1, (total_records + PAGE_SIZE - 1) // PAGE_SIZE)
+    page = max(0, min(page, total_pages - 1))
+
+    start_idx = page * PAGE_SIZE
+    end_idx = min(start_idx + PAGE_SIZE, total_records)
+    page_records = records[start_idx:end_idx]
+
+    lines = [
+        "🗑️ *Delete a Reminder Schedule*",
+        f"Showing {start_idx+1}–{end_idx} of {total_records} student(s).",
+        "Tap a student button below to delete their reminder:\n",
+    ]
+
+    buttons = []
+    for i, rec in enumerate(page_records, start=start_idx):
+        uname = rec.get("telegram_username", f"Student {i+1}")
+        sname = rec.get("student_name", "")
+        due = rec.get("due_date")
+        lines.append(f"{i+1}. `{uname}` ({sname}) — Due: `{due}`")
+        label = f"❌ {i+1}. {uname}"
+        buttons.append(
+            [InlineKeyboardButton(label, callback_data=f"del:ask:{i}:{page}")]
+        )
+
+    # Pagination navigation
+    nav_buttons = []
+    if page > 0:
+        nav_buttons.append(
+            InlineKeyboardButton("⬅️ Prev", callback_data=f"menu:delete_list:{page-1}")
+        )
+    if total_pages > 1:
+        nav_buttons.append(
+            InlineKeyboardButton(
+                f"📄 {page+1}/{total_pages}", callback_data=f"menu:delete_list:{page}"
+            )
+        )
+    if page < total_pages - 1:
+        nav_buttons.append(
+            InlineKeyboardButton("Next ➡️", callback_data=f"menu:delete_list:{page+1}")
+        )
+    if nav_buttons:
+        buttons.append(nav_buttons)
+
+    buttons.append(
+        [InlineKeyboardButton("⬅️ Back to Menu", callback_data="menu:home")]
+    )
+    return "\n".join(lines), InlineKeyboardMarkup(buttons)
+
+
+# ---------------------------------------------------------------------------
+# Handlers
+# ---------------------------------------------------------------------------
+
+
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """/start — Welcome authorized users, register + auth flow for new users."""
+    """/start — Welcome authorized users with Menu UI, register new students/teachers."""
     user = update.effective_user
     chat_id = update.effective_chat.id
     user_id = user.id
@@ -251,20 +579,12 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     _register_chat_id(user.username, chat_id)
 
     if user_id in _authorized_users:
-        # Already authorized (admin or previously approved)
-        record_count = len(_user_records.get(user_id, []))
-        text = (
-            f"👋 Hello, {name}!\n\n"
-            "I'm a *Payment Reminder Bot*. I automatically send Telegram reminders "
-            "to students before their payment deadline.\n\n"
-            "━━━━━━━━━━━━━━━━━━━━\n"
-            f"🪪 *Your Chat ID is:* `{chat_id}`\n"
-            f"📊 *Your loaded records:* {record_count}\n"
-            "━━━━━━━━━━━━━━━━━━━━\n\n"
-            "Upload an Excel file (.xlsx) to schedule reminders for your students.\n"
-            "Use /status to check your current records and upcoming reminders."
+        # Already authorized (admin or previously approved) -> show full Menu UI
+        text = _get_home_text(user_id, name)
+        keyboard = _build_main_menu_keyboard(_is_admin(update))
+        await update.message.reply_text(
+            text, reply_markup=keyboard, parse_mode="Markdown"
         )
-        await update.message.reply_text(text, parse_mode="Markdown")
     else:
         # New user — registered for reminders + offer teacher authorization
         _pending_auth.add(user_id)
@@ -282,7 +602,12 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """/help — Same as /start."""
+    """/help — Same as /start /menu."""
+    await cmd_start(update, context)
+
+
+async def cmd_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/menu — Display the interactive Menu UI."""
     await cmd_start(update, context)
 
 
@@ -293,35 +618,487 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         return
 
     user_id = update.effective_user.id
-    records = _user_records.get(user_id, [])
-    total = len(records)
-    with_chat_id = sum(1 for r in records if r.get("telegram_chat_id"))
-    without_chat_id = total - with_chat_id
+    text = _render_status_text(user_id)
+    keyboard = InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("📨 Send Now", callback_data="menu:check"),
+                InlineKeyboardButton("🗑️ Delete", callback_data="menu:delete_list:0"),
+            ],
+            [InlineKeyboardButton("⬅️ Back to Menu", callback_data="menu:home")],
+        ]
+    )
+    await update.message.reply_text(text, reply_markup=keyboard, parse_mode="Markdown")
 
+
+async def cmd_check(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/check [all] — Manually trigger a reminder check right now and report results."""
+    if not _is_authorized(update):
+        await update.message.reply_text("❌ You are not authorized. Send /start to begin.")
+        return
+
+    user_id = update.effective_user.id
+    is_admin = _is_admin(update)
+    args = context.args or []
+    check_all = is_admin and len(args) > 0 and args[0].lower() == "all"
+
+    targets = list(_user_records.keys()) if check_all else [user_id]
+    msg = await update.message.reply_text("⏳ Running reminder check…")
+
+    today = datetime.datetime.now(ZoneInfo(TIMEZONE)).date()
     lines = [
-        "📊 *Your Status*",
-        f"Loaded records: {total}",
-        f"✅ With Chat ID: {with_chat_id}",
-        f"⚠️ Missing Chat ID: {without_chat_id}",
+        "🔍 *Reminder Check Report*",
+        f"📅 Date: `{today}` (`{TIMEZONE}`)",
+        f"🎯 Window: `{REMINDER_DAYS_BEFORE}` day(s) before deadline",
+        "",
     ]
 
-    if total == 0:
-        lines.append("\n_No Excel file loaded yet. Upload a .xlsx file to begin._")
-    else:
-        upcoming = reminder_scheduler.get_upcoming_reminders(
-            records, TIMEZONE, REMINDER_DAYS_BEFORE, n=5
-        )
-        if upcoming:
-            lines.append("\n📅 *Next upcoming reminders:*")
-            for rec in upcoming:
-                lines.append(
-                    f"• {rec['student_name']} ({rec['telegram_username']}) "
-                    f"— due {rec['due_date']} (in {rec['days_until_due']} days)"
-                )
-        else:
-            lines.append("\n_No upcoming reminders in the next period._")
+    total_sent = 0
+    total_already_sent = 0
+    total_not_due = 0
+    total_missing_chat_id = 0
+    total_failed = 0
+    total_records_checked = 0
 
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+    for uid in targets:
+        records = _user_records.get(uid, [])
+        if not records:
+            if not check_all:
+                lines.append("ℹ️ _No student records loaded. Upload an Excel file first._")
+            continue
+
+        total_records_checked += len(records)
+        _resolve_chat_ids(records)
+        try:
+            res = await reminder_scheduler.daily_check(
+                bot=context.bot,
+                records=records,
+                owner_chat_id=uid,
+                timezone_str=TIMEZONE,
+                reminder_days=REMINDER_DAYS_BEFORE,
+                sent_reminders_path=_user_sent_reminders_path(uid),
+            )
+        except Exception as exc:
+            logger.error("Manual check failed for user %s: %s", uid, exc)
+            lines.append(f"❌ Check failed for user `{uid}`: {exc}")
+            continue
+
+        prefix = f"[User {uid}] " if check_all else ""
+
+        if res["sent"]:
+            lines.append(f"✅ *{prefix}Sent ({len(res['sent'])}):*")
+            for r in res["sent"][:10]:
+                lines.append(f"  • {r['student_name']} (`{r['telegram_username']}`) — due `{r['due_date']}`")
+            total_sent += len(res["sent"])
+
+        if res["already_sent"]:
+            lines.append(f"ℹ️ *{prefix}Already Sent ({len(res['already_sent'])}):*")
+            for r in res["already_sent"][:10]:
+                lines.append(f"  • {r['student_name']} (`{r['telegram_username']}`) — due `{r['due_date']}`")
+            total_already_sent += len(res["already_sent"])
+
+        if res["not_due"]:
+            lines.append(f"⏳ *{prefix}Not Due Yet ({len(res['not_due'])}):*")
+            for r in res["not_due"][:10]:
+                days = r.get("days_until_due", "?")
+                lines.append(
+                    f"  • {r['student_name']} (`{r['telegram_username']}`) — due `{r['due_date']}` "
+                    f"(in {days}d; target={REMINDER_DAYS_BEFORE}d)"
+                )
+            total_not_due += len(res["not_due"])
+
+        if res["no_chat_id"]:
+            lines.append(f"⚠️ *{prefix}Missing Chat ID ({len(res['no_chat_id'])}):*")
+            for r in res["no_chat_id"][:10]:
+                lines.append(f"  • {r['student_name']} (`{r['telegram_username']}`)")
+            total_missing_chat_id += len(res["no_chat_id"])
+
+        if res["failed"]:
+            lines.append(f"❌ *{prefix}Send Failed ({len(res['failed'])}):*")
+            for r, err in res["failed"][:10]:
+                lines.append(f"  • `{r.get('telegram_username')}`: {err}")
+            total_failed += len(res["failed"])
+
+    if total_records_checked > 0 and not total_sent and not total_already_sent and not total_not_due:
+        lines.append(f"ℹ️ Checked {total_records_checked} record(s). None matched.")
+
+    keyboard = InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("⚙️ Scheduler", callback_data="menu:scheduler"),
+                InlineKeyboardButton("📜 History", callback_data="menu:history"),
+            ],
+            [InlineKeyboardButton("⬅️ Back to Menu", callback_data="menu:home")],
+        ]
+    )
+    await msg.edit_text("\n".join(lines), reply_markup=keyboard, parse_mode="Markdown")
+
+
+async def cmd_scheduler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/scheduler — Check scheduler state, countdown, and active schedule data."""
+    if not _is_authorized(update):
+        await update.message.reply_text("❌ You are not authorized. Send /start to begin.")
+        return
+
+    user_id = update.effective_user.id
+    text = _render_scheduler_text(user_id)
+    keyboard = InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("📨 Check & Send Now", callback_data="menu:check"),
+                InlineKeyboardButton("🗑️ Delete", callback_data="menu:delete_list:0"),
+            ],
+            [
+                InlineKeyboardButton("🔄 Refresh Queue", callback_data="menu:scheduler"),
+                InlineKeyboardButton("⬅️ Back to Menu", callback_data="menu:home"),
+            ],
+        ]
+    )
+    await update.message.reply_text(text, reply_markup=keyboard, parse_mode="Markdown")
+
+
+async def cmd_delete(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/delete — Interactive UI to delete individual reminder schedules."""
+    if not _is_authorized(update):
+        await update.message.reply_text("❌ You are not authorized. Send /start to begin.")
+        return
+
+    user_id = update.effective_user.id
+    text, keyboard = _render_delete_list(user_id, page=0)
+    await update.message.reply_text(text, reply_markup=keyboard, parse_mode="Markdown")
+
+
+async def cmd_history(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/history — View sent reminders history for this user."""
+    if not _is_authorized(update):
+        await update.message.reply_text("❌ You are not authorized. Send /start to begin.")
+        return
+
+    user_id = update.effective_user.id
+    text = _render_history_text(user_id)
+    keyboard = InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("🗑️ Clear Sent History", callback_data="menu:clearsent")],
+            [InlineKeyboardButton("⬅️ Back to Menu", callback_data="menu:home")],
+        ]
+    )
+    await update.message.reply_text(text, reply_markup=keyboard, parse_mode="Markdown")
+
+
+async def cmd_clearsent(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/clearsent — Clear sent reminders history for this user (for testing)."""
+    if not _is_authorized(update):
+        await update.message.reply_text("❌ You are not authorized. Send /start to begin.")
+        return
+
+    user_id = update.effective_user.id
+    path = _user_sent_reminders_path(user_id)
+    sent_keys = reminder_scheduler.load_sent_reminders(path)
+    count = len(sent_keys)
+
+    reminder_scheduler.save_sent_reminders(set(), path)
+
+    text = (
+        f"🗑️ *Sent reminder history cleared!* ({count} entry/entries removed)\n\n"
+        "You can now use /check to test-send reminders again for today's deadlines."
+    )
+    keyboard = InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("📨 Send Now", callback_data="menu:check")],
+            [InlineKeyboardButton("⬅️ Back to Menu", callback_data="menu:home")],
+        ]
+    )
+    await update.message.reply_text(text, reply_markup=keyboard, parse_mode="Markdown")
+
+
+async def cmd_users(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/users — Admin-only: list all authorized teachers and student registry stats."""
+    if not _is_admin(update):
+        await update.message.reply_text("❌ This command is only available to the Admin.")
+        return
+
+    lines = [
+        "👥 *Authorized Users & Registry*",
+        f"• *Admin Chat ID:* `{ADMIN_TELEGRAM_ID}`",
+        f"• *Authorized Teachers ({len(_authorized_users)}):*",
+    ]
+
+    for uid in sorted(_authorized_users):
+        rec_count = len(_user_records.get(uid, []))
+        role = "👑 Admin" if uid == ADMIN_TELEGRAM_ID else "🎓 Teacher"
+        lines.append(f"  - `{uid}` ({role}): {rec_count} student(s) loaded")
+
+    lines += [
+        "",
+        f"• *Auto-Captured Student Chat IDs:* {len(_chat_id_registry)} registered",
+    ]
+
+    if _chat_id_registry:
+        reg_usernames = list(_chat_id_registry.keys())[:10]
+        lines.append("  Registered usernames: " + ", ".join(reg_usernames))
+        if len(_chat_id_registry) > 10:
+            lines.append(f"  … and {len(_chat_id_registry) - 10} more.")
+
+    keyboard = InlineKeyboardMarkup(
+        [[InlineKeyboardButton("⬅️ Back to Menu", callback_data="menu:home")]]
+    )
+    await update.message.reply_text("\n".join(lines), reply_markup=keyboard, parse_mode="Markdown")
+
+
+async def handle_callback_query(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Handle all interactive inline keyboard clicks for the menu UI."""
+    query = update.callback_query
+    if not query:
+        return
+    await query.answer()
+
+    user_id = query.from_user.id
+    if user_id not in _authorized_users:
+        try:
+            await query.edit_text("❌ You are not authorized. Send /start to begin.")
+        except BadRequest:
+            pass
+        return
+
+    is_admin = user_id == ADMIN_TELEGRAM_ID
+    data = query.data or ""
+
+    if data == "menu:home":
+        first_name = query.from_user.first_name if query.from_user else "there"
+        text = _get_home_text(user_id, first_name)
+        keyboard = _build_main_menu_keyboard(is_admin)
+        try:
+            await query.edit_text(text, reply_markup=keyboard, parse_mode="Markdown")
+        except BadRequest:
+            pass
+
+    elif data == "menu:status":
+        text = _render_status_text(user_id)
+        keyboard = InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton("📨 Send Now", callback_data="menu:check"),
+                    InlineKeyboardButton("🗑️ Delete", callback_data="menu:delete_list:0"),
+                ],
+                [InlineKeyboardButton("⬅️ Back to Menu", callback_data="menu:home")],
+            ]
+        )
+        try:
+            await query.edit_text(text, reply_markup=keyboard, parse_mode="Markdown")
+        except BadRequest:
+            pass
+
+    elif data == "menu:scheduler":
+        text = _render_scheduler_text(user_id)
+        keyboard = InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton("📨 Check & Send Now", callback_data="menu:check"),
+                    InlineKeyboardButton("🗑️ Delete", callback_data="menu:delete_list:0"),
+                ],
+                [
+                    InlineKeyboardButton("🔄 Refresh Queue", callback_data="menu:scheduler"),
+                    InlineKeyboardButton("⬅️ Back to Menu", callback_data="menu:home"),
+                ],
+            ]
+        )
+        try:
+            await query.edit_text(text, reply_markup=keyboard, parse_mode="Markdown")
+        except BadRequest:
+            pass
+
+    elif data == "menu:check":
+        records = _user_records.get(user_id, [])
+        _resolve_chat_ids(records)
+        today = datetime.datetime.now(ZoneInfo(TIMEZONE)).date()
+
+        lines = [
+            "🔍 *Manual Check Report*",
+            f"📅 Date: `{today}` (`{TIMEZONE}`)",
+            f"🎯 Window: `{REMINDER_DAYS_BEFORE}` day(s) before deadline",
+            "",
+        ]
+
+        if not records:
+            lines.append("ℹ️ _No student records loaded. Upload an Excel file first._")
+        else:
+            try:
+                res = await reminder_scheduler.daily_check(
+                    bot=context.bot,
+                    records=records,
+                    owner_chat_id=user_id,
+                    timezone_str=TIMEZONE,
+                    reminder_days=REMINDER_DAYS_BEFORE,
+                    sent_reminders_path=_user_sent_reminders_path(user_id),
+                )
+                if res["sent"]:
+                    lines.append(f"✅ *Sent ({len(res['sent'])}):*")
+                    for r in res["sent"][:10]:
+                        lines.append(
+                            f"  • {r['student_name']} (`{r['telegram_username']}`) — due `{r['due_date']}`"
+                        )
+                if res["already_sent"]:
+                    lines.append(f"ℹ️ *Already Sent ({len(res['already_sent'])}):*")
+                    for r in res["already_sent"][:10]:
+                        lines.append(
+                            f"  • {r['student_name']} (`{r['telegram_username']}`) — due `{r['due_date']}`"
+                        )
+                if res["not_due"]:
+                    lines.append(f"⏳ *Not Due Yet ({len(res['not_due'])}):*")
+                    for r in res["not_due"][:10]:
+                        days = r.get("days_until_due", "?")
+                        lines.append(
+                            f"  • {r['student_name']} (`{r['telegram_username']}`) — due `{r['due_date']}` (in {days}d)"
+                        )
+                if res["no_chat_id"]:
+                    lines.append(f"⚠️ *Missing Chat ID ({len(res['no_chat_id'])}):*")
+                    for r in res["no_chat_id"][:10]:
+                        lines.append(f"  • {r['student_name']} (`{r['telegram_username']}`)")
+                if res["failed"]:
+                    lines.append(f"❌ *Send Failed ({len(res['failed'])}):*")
+                    for r, err in res["failed"][:10]:
+                        lines.append(f"  • `{r.get('telegram_username')}`: {err}")
+            except Exception as exc:
+                lines.append(f"❌ Check failed: {exc}")
+
+        keyboard = InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton("⚙️ Scheduler", callback_data="menu:scheduler"),
+                    InlineKeyboardButton("📜 History", callback_data="menu:history"),
+                ],
+                [InlineKeyboardButton("⬅️ Back to Menu", callback_data="menu:home")],
+            ]
+        )
+        try:
+            await query.edit_text("\n".join(lines), reply_markup=keyboard, parse_mode="Markdown")
+        except BadRequest:
+            pass
+
+    elif data == "menu:history":
+        text = _render_history_text(user_id)
+        keyboard = InlineKeyboardMarkup(
+            [
+                [InlineKeyboardButton("🗑️ Clear Sent History", callback_data="menu:clearsent")],
+                [InlineKeyboardButton("⬅️ Back to Menu", callback_data="menu:home")],
+            ]
+        )
+        try:
+            await query.edit_text(text, reply_markup=keyboard, parse_mode="Markdown")
+        except BadRequest:
+            pass
+
+    elif data == "menu:clearsent":
+        path = _user_sent_reminders_path(user_id)
+        sent_keys = reminder_scheduler.load_sent_reminders(path)
+        count = len(sent_keys)
+        reminder_scheduler.save_sent_reminders(set(), path)
+
+        text = (
+            f"🗑️ *Sent reminder history cleared!* ({count} entry/entries removed)\n\n"
+            "You can now use *Check & Send Now* to test-send reminders again for today's deadlines."
+        )
+        keyboard = InlineKeyboardMarkup(
+            [
+                [InlineKeyboardButton("📨 Send Now", callback_data="menu:check")],
+                [InlineKeyboardButton("⬅️ Back to Menu", callback_data="menu:home")],
+            ]
+        )
+        try:
+            await query.edit_text(text, reply_markup=keyboard, parse_mode="Markdown")
+        except BadRequest:
+            pass
+
+    elif data == "menu:users":
+        if not is_admin:
+            await query.answer("❌ Admin only", show_alert=True)
+            return
+        lines = [
+            "👥 *Authorized Users & Registry*",
+            f"• *Admin Chat ID:* `{ADMIN_TELEGRAM_ID}`",
+            f"• *Authorized Teachers ({len(_authorized_users)}):*",
+        ]
+        for uid in sorted(_authorized_users):
+            rec_count = len(_user_records.get(uid, []))
+            role = "👑 Admin" if uid == ADMIN_TELEGRAM_ID else "🎓 Teacher"
+            lines.append(f"  - `{uid}` ({role}): {rec_count} student(s) loaded")
+        lines += [
+            "",
+            f"• *Auto-Captured Student Chat IDs:* {len(_chat_id_registry)} registered",
+        ]
+        keyboard = InlineKeyboardMarkup(
+            [[InlineKeyboardButton("⬅️ Back to Menu", callback_data="menu:home")]]
+        )
+        try:
+            await query.edit_text("\n".join(lines), reply_markup=keyboard, parse_mode="Markdown")
+        except BadRequest:
+            pass
+
+    elif data.startswith("menu:delete_list:"):
+        page = int(data.split(":")[2])
+        text, keyboard = _render_delete_list(user_id, page)
+        try:
+            await query.edit_text(text, reply_markup=keyboard, parse_mode="Markdown")
+        except BadRequest:
+            pass
+
+    elif data.startswith("del:ask:"):
+        parts = data.split(":")
+        idx = int(parts[2])
+        page = int(parts[3])
+        records = _user_records.get(user_id, [])
+        if 0 <= idx < len(records):
+            rec = records[idx]
+            uname = rec.get("telegram_username", "")
+            sname = rec.get("student_name", uname)
+            due = rec.get("due_date")
+            text = (
+                "⚠️ *Confirm Schedule Deletion*\n\n"
+                f"Are you sure you want to delete this reminder?\n\n"
+                f"• *Student:* {sname} (`{uname}`)\n"
+                f"• *Due Date:* `{due}`\n\n"
+                "This will permanently remove the student from your reminder schedule and save your Excel file."
+            )
+            keyboard = InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton(
+                            "🗑️ Yes, Delete", callback_data=f"del:confirm:{idx}:{page}"
+                        ),
+                        InlineKeyboardButton(
+                            "❌ Cancel", callback_data=f"menu:delete_list:{page}"
+                        ),
+                    ],
+                    [InlineKeyboardButton("⬅️ Back to Menu", callback_data="menu:home")],
+                ]
+            )
+            try:
+                await query.edit_text(text, reply_markup=keyboard, parse_mode="Markdown")
+            except BadRequest:
+                pass
+
+    elif data.startswith("del:confirm:"):
+        parts = data.split(":")
+        idx = int(parts[2])
+        page = int(parts[3])
+        records = _user_records.get(user_id, [])
+        if 0 <= idx < len(records):
+            removed = records.pop(idx)
+            # Save updated records to user's Excel file
+            excel_path = _user_excel_path(user_id)
+            excel_handler.save_excel(records, str(excel_path))
+            uname = removed.get("telegram_username", "")
+            due = removed.get("due_date")
+            await query.answer(f"✅ Deleted reminder for {uname}!", show_alert=False)
+
+            text, keyboard = _render_delete_list(user_id, page)
+            text = f"✅ *Deleted reminder for `{uname}` (due `{due}`).*\n\n" + text
+            try:
+                await query.edit_text(text, reply_markup=keyboard, parse_mode="Markdown")
+            except BadRequest:
+                pass
 
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -415,9 +1192,33 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             reply_lines.append(f"… and {len(unresolved_names) - 10} more.")
 
     reply_lines += ["", "Automatic payment reminders are now scheduled."]
+
+    # Immediately check & send any reminders that are due right now
+    try:
+        check_res = await reminder_scheduler.daily_check(
+            bot=context.bot,
+            records=valid_records,
+            owner_chat_id=user_id,
+            timezone_str=TIMEZONE,
+            reminder_days=REMINDER_DAYS_BEFORE,
+            sent_reminders_path=_user_sent_reminders_path(user_id),
+        )
+        if check_res and check_res.get("sent"):
+            sent_students = [
+                f"{r.get('student_name', r.get('telegram_username'))} ({r.get('telegram_username')})"
+                for r in check_res["sent"]
+            ]
+            reply_lines.append(
+                f"\n📨 *Immediately sent {len(check_res['sent'])} reminder(s):*\n• "
+                + "\n• ".join(sent_students[:5])
+            )
+    except Exception as exc:
+        logger.error("Immediate check after upload failed for user %s: %s", user_id, exc)
+
     if errors:
         reply_lines += ["", "⚠️ *Issues found (rows skipped):*", _format_errors(errors)]
 
+    reply_lines += ["\n💡 Tip: Use /check to view check results or /scheduler for timer info."]
     await update.message.reply_text("\n".join(reply_lines), parse_mode="Markdown")
 
 
@@ -607,7 +1408,21 @@ def main() -> None:
     # Register handlers
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))
+    app.add_handler(CommandHandler("menu", cmd_menu))
     app.add_handler(CommandHandler("status", cmd_status))
+    app.add_handler(CommandHandler("check", cmd_check))
+    app.add_handler(CommandHandler("runcheck", cmd_check))
+    app.add_handler(CommandHandler("scheduler", cmd_scheduler))
+    app.add_handler(CommandHandler("schedule", cmd_scheduler))
+    app.add_handler(CommandHandler("scheduledata", cmd_scheduler))
+    app.add_handler(CommandHandler("schedule_data", cmd_scheduler))
+    app.add_handler(CommandHandler("delete", cmd_delete))
+    app.add_handler(CommandHandler("removereminder", cmd_delete))
+    app.add_handler(CommandHandler("history", cmd_history))
+    app.add_handler(CommandHandler("clearsent", cmd_clearsent))
+    app.add_handler(CommandHandler("resethistory", cmd_clearsent))
+    app.add_handler(CommandHandler("users", cmd_users))
+    app.add_handler(CallbackQueryHandler(handle_callback_query))
     app.add_handler(
         MessageHandler(filters.Document.ALL & filters.ChatType.PRIVATE, handle_document)
     )
