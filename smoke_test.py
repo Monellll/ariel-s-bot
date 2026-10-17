@@ -60,7 +60,7 @@ def make_xlsx(rows: list[list], headers: list[str]) -> str:
 
 
 # ===========================================================================
-# Test 1: Valid rows parse correctly
+# Test 1: Valid rows parse correctly (including various date formats)
 # ===========================================================================
 print("\n--- Test 1: Valid rows ---")
 xlsx = make_xlsx(
@@ -68,14 +68,18 @@ xlsx = make_xlsx(
     rows=[
         ["@Alice", "Alice Smith", "2026-12-01", 111111111],
         ["@Bob", "Bob Jones", "2026-11-20", 222222222],
+        ["@Charlie", "Charlie Brown", "2026-10-16 00:00:00", 333333333],
+        ["@Dave", "Dave Miller", datetime.datetime(2026, 10, 16, 0, 0), 444444444],
     ],
 )
 records, invalid, errors = excel_handler.load_excel(xlsx)
 os.unlink(xlsx)
 
-check("Two valid rows loaded", len(records) == 2, f"got {len(records)}")
+check("Four valid rows loaded", len(records) == 4, f"got {len(records)}")
 check("No invalid rows", invalid == 0, f"got {invalid}")
 check("due_date is datetime.date", isinstance(records[0]["due_date"], datetime.date))
+check("datetime string parsed", records[2]["due_date"] == datetime.date(2026, 10, 16))
+check("native datetime parsed", records[3]["due_date"] == datetime.date(2026, 10, 16))
 check("student_name preserved", records[0]["student_name"] == "Alice Smith")
 check("chat_id is int", records[0]["telegram_chat_id"] == 111111111)
 

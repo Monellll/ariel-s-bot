@@ -8,27 +8,42 @@
 
 A simple Telegram bot supporting multiple independent users (e.g. teachers or class administrators). Each user manages their own Excel file, student roster, payment deadlines, and reminder history separately.
 
-### 🔑 User Workflow:
+### 🔑 Complete Workflow & Architecture:
+
 1. **Admin Access:**
    - The user whose numeric Telegram ID matches `ADMIN_TELEGRAM_ID` in `.env` is auto-authorized on start.
-2. **New Users (Teachers):**
-   - When a new user opens the bot and sends `/start`, the bot detects they are unauthorized and asks for the **Admin's Telegram Chat ID**.
-3. **Authorization:**
-   - The user enters the numeric Admin Chat ID.
-   - If correct: user is added to `data/authorized_users.json`, and the bot notifies the Admin.
-   - If incorrect: access is rejected and they are prompted to try `/start` again.
-4. **Excel Upload:**
-   - Any authorized user can upload their `.xlsx` file.
-   - The bot validates the document using `excel_handler.py`.
-   - If valid: saved to `data/{user_id}/students.xlsx`, loaded into `_user_records[user_id]`.
-   - If invalid: previous valid file/records are preserved; errors are reported to that user.
+
+2. **Student Auto-Registration (`@username` → `chat_id` capture):**
+   - Because the Telegram Bot API cannot message users purely by username without a known numeric `chat_id` (and prior interaction), the bot automatically captures chat IDs.
+   - When a student opens the bot and sends `/start`, the bot extracts their Telegram username and numeric chat ID and saves it to `data/chat_id_registry.json`.
+   - The student receives a confirmation:
+     > *"✅ You are now registered! You will receive automatic payment reminders when your teacher schedules them."*
+
+3. **New Teachers (Authorization Flow):**
+   - When a new unauthorized user sends `/start`, the message confirms registration and also prompts:
+     > *"🎓 Are you a teacher/admin? Enter the Admin Chat ID below to get full access."*
+   - Entering the correct `ADMIN_TELEGRAM_ID` adds them to `data/authorized_users.json` and notifies the Admin.
+   - Incorrect entries reject access.
+
+4. **Excel Upload (Teachers):**
+   - Teachers only need to provide **`telegram_username`** and **`due_date`** (optional: `student_name`).
+   - `telegram_chat_id` is **NOT required** in the Excel file!
+   - On upload:
+     - The file is validated via `excel_handler.py`.
+     - Valid records are saved to `data/{user_id}/students.xlsx` and loaded into `_user_records[user_id]`.
+     - `_resolve_chat_ids()` automatically cross-references `data/chat_id_registry.json` and maps `@username` to `chat_id`.
+     - The bot reports: Total records, valid count, auto-matched count, and a list of students who haven't tapped `/start` yet.
+
 5. **Separate Reminders & Isolation:**
-   - Each user has their own records in `_user_records[user_id]`.
+   - Each teacher's data is isolated in `data/{user_id}/`.
    - Each user has their own reminder history in `data/{user_id}/sent_reminders.json`.
-   - Daily check evaluates each user's records independently. Reminders are sent 5 days before deadlines.
-   - Any warnings (students missing chat IDs, send failures) are sent directly to that specific user (`owner_chat_id`).
+   - Scheduled checks independently evaluate each teacher's roster.
+   - Before each check, `_resolve_chat_ids()` runs again so students who tapped `/start` after the upload are picked up dynamically.
+   - Reminders are sent 5 days before deadlines (or today in testing mode).
+   - Warnings (unregistered students, send failures) go to the file owner (`owner_chat_id`).
+
 6. **Commands:**
-   - `/start` or `/help`: Welcome message, Chat ID, and loaded record count (or auth prompt for new users).
+   - `/start` or `/help`: Welcome message, Chat ID, and loaded record count (or student registration / teacher auth prompt).
    - `/status`: Shows current user's loaded student count and next 5 upcoming reminders (plus authorized users count for admin).
 
 ---
@@ -39,11 +54,13 @@ A simple Telegram bot supporting multiple independent users (e.g. teachers or cl
 Ariel's Bot/
 ├── prompt.md                              # Original build blueprint / spec
 ├── context.md                             # ← YOU ARE HERE
+├── test_upload.xlsx                       # Sample test Excel without chat_id column
 └── telegram-payment-reminder/             # The application
-    ├── bot.py                             # Entry point: Multi-user Telegram handlers + APScheduler
+    ├── bot.py                             # Entry point: Multi-user Telegram handlers + Registry + APScheduler
     ├── excel_handler.py                   # Excel parsing & validation (pure Python, no Telegram)
     ├── reminder_scheduler.py              # Daily check logic, message formatting, JSON persistence
     ├── smoke_test.py                      # Offline unit/smoke tests (mock bot, 30 test cases)
+    ├── create_test_xlsx.py                # Helper script to generate sample test Excel
     ├── requirements.txt                   # Python dependencies
     ├── .env                               # Real secrets (git-ignored)
     ├── .env.example                       # Template for .env
@@ -53,6 +70,7 @@ Ariel's Bot/
     ├── railway.toml                       # Railway deployment config
     ├── data/
     │   ├── authorized_users.json          # Persisted authorized user IDs (git-ignored)
+    │   ├── chat_id_registry.json          # Persistent registry mapping @username -> chat_id (git-ignored)
     │   ├── {user_id}/                     # Per-user isolated directory (git-ignored)
     │   │   ├── students.xlsx              # That user's student roster
     │   │   └── sent_reminders.json        # That user's sent reminder history
@@ -73,17 +91,22 @@ Ariel's Bot/
   - `_user_records: dict[int, list[dict]]`
   - `_authorized_users: set[int]`
   - `_pending_auth: set[int]`
+  - `_chat_id_registry: dict[str, int]` (mapping lowercase `@username` to `chat_id`)
+- **Chat ID Auto-Resolution**:
+  - `_load_chat_id_registry()` / `_save_chat_id_registry()`
+  - `_register_chat_id(username, chat_id)`: registers user whenever anyone runs `/start`.
+  - `_resolve_chat_ids(records)`: automatically matches records to known chat IDs.
 - Handles commands (`/start`, `/help`, `/status`) with per-user scope.
 - Handles document uploads (`handle_document`) storing each user's `.xlsx` in `data/{user_id}/students.xlsx`.
-- Handles text input (`handle_text`) to verify the Admin Chat ID for authorization.
-- Runs `_run_daily_check` which iterates each user's roster and calls `reminder_scheduler.daily_check`.
+- Handles text input (`handle_text`) to verify the Admin Chat ID for teacher authorization.
+- Runs `_run_daily_check` which resolves missing IDs, iterates each user's roster, and calls `reminder_scheduler.daily_check`.
 - Startup migration: automatically migrates legacy single-user `data/students.xlsx` into `data/{ADMIN_TELEGRAM_ID}/students.xlsx` if present.
 
 ### `excel_handler.py` — Excel Parsing & Validation
 - Pure Python + openpyxl. No Telegram dependency.
 - Reads `.xlsx`, maps columns case-insensitively, validates each row.
 - Required columns: `telegram_username`, `due_date`.
-- Optional columns: `student_name` (fallback to username), `telegram_chat_id` (needed for delivery).
+- Optional columns: `student_name` (fallback to username), `telegram_chat_id` (optional, auto-resolved if missing).
 - Returns `(valid_records, invalid_count, error_messages)`.
 - Skips blank rows silently. Reports bad rows without crashing.
 
@@ -137,7 +160,7 @@ Ariel's Bot/
 > [!WARNING]
 > **The bot is currently in TESTING MODE with two temporary overrides:**
 
-1. **`REMINDER_DAYS_BEFORE` defaults to `0`** in `bot.py` line 50 — sends reminders for students due *today* instead of 5 days out. Change back to `"5"` for production.
+1. **`REMINDER_DAYS_BEFORE` defaults to `0`** in `bot.py` line 51 — sends reminders for students due *today* instead of 5 days out. Change back to `"5"` for production.
 
 2. **Scheduler runs every 3 minutes** (interval trigger) instead of once daily at 08:00 via cron in `bot.py`. Revert to cron for production:
 ```python

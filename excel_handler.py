@@ -120,10 +120,12 @@ def _map_columns(header_row: tuple) -> dict[str, int]:
     return col_map
 
 
-def _get_cell(row: tuple, col_index: dict[str, int], col_name: str) -> Optional[str]:
+def _get_cell(row: tuple, col_index: dict[str, int], col_name: str):
     """
     Safely retrieve a cell value by column name.
     Returns None if column doesn't exist or cell is blank.
+    Preserves non-string types (e.g. datetime.date, datetime.datetime, int, float)
+    so that callers like _parse_date() can use isinstance checks correctly.
     """
     idx = col_index.get(col_name)
     if idx is None or idx >= len(row):
@@ -131,6 +133,10 @@ def _get_cell(row: tuple, col_index: dict[str, int], col_name: str) -> Optional[
     val = row[idx]
     if val is None:
         return None
+    # Preserve native types (date/datetime/numeric) — do NOT stringify them here,
+    # because _parse_date() relies on isinstance to handle them correctly.
+    if isinstance(val, (datetime.date, datetime.datetime, int, float)):
+        return val
     stripped = str(val).strip()
     return stripped if stripped else None
 
@@ -191,13 +197,14 @@ def _parse_row(
 
 
 def _parse_date(
-    raw: Optional[str], row_num: int, errors: list[str]
+    raw: object, row_num: int, errors: list[str]
 ) -> Optional[datetime.date]:
     """
     Parse a date value from a cell.
     Accepts:
       - Python datetime.date / datetime.datetime (from openpyxl native date cells)
-      - 'YYYY-MM-DD' strings
+      - 'YYYY-MM-DD' strings, or datetimes with timestamps (e.g. 'YYYY-MM-DD HH:MM:SS')
+      - Common date formats: DD/MM/YYYY, MM/DD/YYYY, YYYY/MM/DD, DD-MM-YYYY
     """
     if raw is None:
         errors.append(f"Row {row_num}: 'due_date' is missing.")
@@ -209,12 +216,51 @@ def _parse_date(
     if isinstance(raw, datetime.date):
         return raw
 
-    # Try parsing string formats
-    for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%m/%d/%Y", "%Y/%m/%d"):
+    s = str(raw).strip()
+    if not s:
+        errors.append(f"Row {row_num}: 'due_date' is missing.")
+        return None
+
+    # Try parsing string formats (both date-only and datetime with timestamp)
+    formats = (
+        "%Y-%m-%d",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d %H:%M",
+        "%Y-%m-%d %I:%M:%S %p",
+        "%Y-%m-%d %I:%M %p",
+        "%d/%m/%Y",
+        "%d/%m/%Y %H:%M:%S",
+        "%d/%m/%Y %H:%M",
+        "%m/%d/%Y",
+        "%m/%d/%Y %H:%M:%S",
+        "%m/%d/%Y %H:%M",
+        "%Y/%m/%d",
+        "%Y/%m/%d %H:%M:%S",
+        "%Y/%m/%d %H:%M",
+        "%d-%m-%Y",
+        "%d-%m-%Y %H:%M:%S",
+    )
+    for fmt in formats:
         try:
-            return datetime.datetime.strptime(str(raw), fmt).date()
+            return datetime.datetime.strptime(s, fmt).date()
         except ValueError:
             continue
+
+    # Also try ISO format parsing (handles ISO 8601 timestamps like "2026-10-16T00:00:00Z")
+    try:
+        return datetime.datetime.fromisoformat(s.replace("Z", "+00:00")).date()
+    except (ValueError, TypeError):
+        pass
+
+    # If string has space or 'T', try parsing just the date portion
+    for sep in (" ", "T"):
+        if sep in s:
+            date_part = s.split(sep)[0]
+            for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%m/%d/%Y", "%Y/%m/%d", "%d-%m-%Y"):
+                try:
+                    return datetime.datetime.strptime(date_part, fmt).date()
+                except ValueError:
+                    continue
 
     errors.append(
         f"Row {row_num}: 'due_date' could not be parsed: {raw!r}. "
