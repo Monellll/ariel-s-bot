@@ -36,19 +36,30 @@ _memory_sent_cache: dict[str, set[str]] = {}
 # ---------------------------------------------------------------------------
 SENT_REMINDERS_PATH = Path("data/sent_reminders.json")
 
-REMINDER_TEMPLATE = """\
-Hi! 
+REMINDER_TEMPLATE_EN = """\
+Hi!
 
-Just a friendly reminder that since we started our class on {start_date_en} , the fee for this month was due on {due_date_en}.
+Just a friendly reminder that the fee for the class is due on {due_date_en}.
 
 No worries at all, just a gentle reminder.
 
-Take your time! 🤍
+Take your time! 🤍\
+"""
 
-Hello, ချယ်ချယ်တို့ အတန်းလေးက {start_date_mm} ရက်နေ့က စတာမို့ {due_date_mm} ရက်နေ့ကျ သင်တန်းကြေးလေး ပြန်သွင်းပေးရပါမယ်ရှင့်
+REMINDER_TEMPLATE_MM = """\
+Hello, ဒီလအတွက် သင်တန်းကြေးလေးက {due_date_mm} ရက်နေ့ နောက်ဆုံးထားပြီး ပေးသွင်းရပါမယ်ရှင့်။
 
 မလောပါဘူးရှင် remind လုပ်တာပါနော်🤍\
 """
+
+REMINDER_TEMPLATE_BOTH = f"""\
+{REMINDER_TEMPLATE_EN}
+
+{REMINDER_TEMPLATE_MM}\
+"""
+
+# Default template alias
+REMINDER_TEMPLATE = REMINDER_TEMPLATE_BOTH
 
 # ---------------------------------------------------------------------------
 # Sent Reminders JSON persistence (Atomic + Cached)
@@ -127,19 +138,27 @@ def format_reminder_message(
     due_date: datetime.date,
     reminder_days: int = 5,
     start_date: Optional[datetime.date] = None,
+    language: str = "both",
 ) -> str:
-    """Format the reminder message from the template."""
-    if start_date is None:
-        # Default to July 14th of the relevant academic cycle
-        start_year = due_date.year if due_date.month >= 7 else due_date.year - 1
-        start_date = datetime.date(start_year, 7, 14)
-
-    start_date_en = _format_ordinal_date(start_date)
+    """
+    Format the reminder message from the template.
+    language can be: 'burmese' (or 'my', 'myanmar'), 'english' (or 'en'), or 'both' (bilingual).
+    """
     due_date_en = _format_ordinal_date(due_date)
-    start_date_mm = _format_myanmar_date(start_date)
     due_date_mm = _format_myanmar_date(due_date)
 
-    return REMINDER_TEMPLATE.format(
+    start_date_en = _format_ordinal_date(start_date) if start_date else ""
+    start_date_mm = _format_myanmar_date(start_date) if start_date else ""
+
+    lang_normalized = (language or "both").strip().lower()
+    if lang_normalized in ("burmese", "my", "myanmar", "mm"):
+        template = REMINDER_TEMPLATE_MM
+    elif lang_normalized in ("english", "en"):
+        template = REMINDER_TEMPLATE_EN
+    else:
+        template = REMINDER_TEMPLATE_BOTH
+
+    return template.format(
         student_name=student_name,
         start_date_en=start_date_en,
         due_date_en=due_date_en,
@@ -193,6 +212,7 @@ async def daily_check(
     reminder_days: int = 5,
     sent_reminders_path: Path = SENT_REMINDERS_PATH,
     admin_chat_id: Optional[int] = None,
+    default_language: str = "both",
 ) -> dict:
     """
     Main daily reminder check.
@@ -287,8 +307,10 @@ async def daily_check(
 
             # Send the reminder
             start_date: Optional[datetime.date] = rec.get("start_date")
+            rec_lang = rec.get("language")
+            chosen_lang = rec_lang if rec_lang else default_language
             message = format_reminder_message(
-                student_name, due_date, reminder_days, start_date=start_date
+                student_name, due_date, reminder_days, start_date=start_date, language=chosen_lang
             )
             try:
                 await bot.send_message(chat_id=chat_id, text=message)

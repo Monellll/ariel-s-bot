@@ -198,6 +198,17 @@ def _parse_row(
     )
     start_date = _parse_date(start_date_raw, row_num, errors) if start_date_raw else None
 
+    # --- language (optional) ---
+    lang_raw = _get_cell(row, col_index, "language") or _get_cell(row, col_index, "lang")
+    language = str(lang_raw).strip().lower() if lang_raw else None
+    if language:
+        if language in ("burmese", "my", "myanmar", "mm", "မြန်မာ"):
+            language = "burmese"
+        elif language in ("english", "en"):
+            language = "english"
+        elif language in ("both", "all", "bilingual"):
+            language = "both"
+
     if errors:
         return errors, None
 
@@ -213,6 +224,7 @@ def _parse_row(
         "due_date": due_date,
         "telegram_chat_id": telegram_chat_id,
         "start_date": start_date,
+        "language": language,
     }
     return [], record
 
@@ -331,6 +343,7 @@ def save_excel(records: list[StudentRecord], file_path: str) -> None:
         "due_date",
         "telegram_chat_id",
         "start_date",
+        "language",
     ]
     ws.append(headers)
 
@@ -354,6 +367,7 @@ def save_excel(records: list[StudentRecord], file_path: str) -> None:
                 due_str,
                 rec.get("telegram_chat_id") if rec.get("telegram_chat_id") is not None else "",
                 start_str,
+                rec.get("language") or "",
             ]
         )
 

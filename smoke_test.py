@@ -407,24 +407,31 @@ msg_default = reminder_scheduler.format_reminder_message(
     due_date=datetime.date(2026, 10, 14),
     reminder_days=5,
 )
-check("Message contains dynamic July 14th default", "July 14th" in msg_default)
 check("Message contains dynamic October 14th", "October 14th" in msg_default)
-check("Message contains Myanmar July 14", "July 14 ရက်နေ့" in msg_default)
 check("Message contains Myanmar October 14", "October 14 ရက်နေ့" in msg_default)
+check("Message contains fee for the class text", "fee for the class is due on" in msg_default)
 check("Message contains gentle reminder text", "No worries at all, just a gentle reminder." in msg_default)
+check("Message contains Myanmar fee text", "ဒီလအတွက် သင်တန်းကြေးလေးက" in msg_default)
 check("Message contains Myanmar polite closing", "မလောပါဘူးရှင် remind လုပ်တာပါနော်🤍" in msg_default)
+check("Message does not contain start_date reference", "since we started" not in msg_default)
 
-# Custom start date
-msg_custom = reminder_scheduler.format_reminder_message(
-    student_name="Bao",
-    due_date=datetime.date(2026, 11, 21),
-    reminder_days=5,
-    start_date=datetime.date(2026, 8, 1),
+# English-only
+msg_en = reminder_scheduler.format_reminder_message(
+    student_name="Ariel",
+    due_date=datetime.date(2026, 10, 14),
+    language="english",
 )
-check("Custom start date ordinal formatted", "August 1st" in msg_custom)
-check("Custom due date ordinal formatted", "November 21st" in msg_custom)
-check("Custom Myanmar start date formatted", "August 1 ရက်နေ့" in msg_custom)
-check("Custom Myanmar due date formatted", "November 21 ရက်နေ့" in msg_custom)
+check("English-only contains English text", "fee for the class is due on October 14th" in msg_en)
+check("English-only does NOT contain Myanmar text", "ဒီလအတွက် သင်တန်းကြေးလေးက" not in msg_en)
+
+# Burmese-only
+msg_my = reminder_scheduler.format_reminder_message(
+    student_name="Ariel",
+    due_date=datetime.date(2026, 10, 14),
+    language="burmese",
+)
+check("Burmese-only contains Myanmar text", "ဒီလအတွက် သင်တန်းကြေးလေးက October 14 ရက်နေ့" in msg_my)
+check("Burmese-only does NOT contain English text", "fee for the class is due" not in msg_my)
 
 # ===========================================================================
 # Test 12: save_excel and delete persistence
@@ -474,8 +481,8 @@ with tempfile.TemporaryDirectory() as tmpdir:
 print("\n--- Test 13: Strict duplicate impossibility & concurrency protection ---")
 async def run_concurrency_test():
     with tempfile.TemporaryDirectory() as tmpdir:
-        json_path = Path(tmpdir) / "sent_reminders.json"
-        target_date = datetime.date(2026, 10, 22)
+        today_yangon = datetime.datetime.now(ZoneInfo("Asia/Yangon")).date()
+        target_date = today_yangon + datetime.timedelta(days=5)
 
         # Roster with duplicate rows of the exact same student
         dup_records = [
@@ -537,9 +544,49 @@ async def run_concurrency_test():
 
         # Confirm persisted immediately
         saved_keys = reminder_scheduler.load_sent_reminders(json_path)
-        check("Key is persisted in sent_reminders.json", "555555:2026-10-22" in saved_keys)
+        expected_key = f"555555:{target_date.strftime('%Y-%m-%d')}"
+        check("Key is persisted in sent_reminders.json", expected_key in saved_keys)
 
 asyncio.run(run_concurrency_test())
+
+# ===========================================================================
+# Test 14: i18n Internationalization (Burmese & English)
+# ===========================================================================
+print("\n--- Test 14: i18n Internationalization (Burmese & English) ---")
+import i18n
+
+check("English button translation", i18n.t("btn_roster_status", "en") == "📊 Roster & Status")
+check("Burmese button translation", i18n.t("btn_roster_status", "my") == "📊 ကျောင်းသားစာရင်းနှင့် အခြေအနေ")
+check("Fallback to English if key missing in language", i18n.t("non_existent_key", "my") == "non_existent_key")
+
+# User language preference switching
+i18n.set_user_language(99999, "en")
+check("User language set to English", i18n.get_user_language(99999) == "en")
+i18n.set_user_language(99999, "my")
+check("User language switched to Burmese", i18n.get_user_language(99999) == "my")
+
+# Excel language column parsing
+with tempfile.TemporaryDirectory() as tmpdir:
+    test_xlsx = Path(tmpdir) / "lang_test.xlsx"
+    records_with_lang = [
+        {
+            "telegram_username": "@student_en",
+            "student_name": "English Student",
+            "due_date": datetime.date(2026, 11, 1),
+            "language": "english",
+        },
+        {
+            "telegram_username": "@student_my",
+            "student_name": "Burmese Student",
+            "due_date": datetime.date(2026, 11, 2),
+            "language": "burmese",
+        },
+    ]
+    excel_handler.save_excel(records_with_lang, str(test_xlsx))
+    loaded, _, _ = excel_handler.load_excel(str(test_xlsx))
+    check("Excel parses english language column", loaded[0]["language"] == "english")
+    check("Excel parses burmese language column", loaded[1]["language"] == "burmese")
+
 
 # ===========================================================================
 # Summary
