@@ -1181,18 +1181,35 @@ async def on_startup(application: Application) -> None:
             except Exception as exc:
                 logger.warning("Could not load Excel for user %s: %s", user_id, exc)
 
-    # Start APScheduler (Runs every 3 minutes for testing)
+    # Start APScheduler: Production mode (daily 8:00 AM) or Test mode (interval)
+    check_interval = int(os.getenv("CHECK_INTERVAL_MINUTES", "0"))
     _scheduler = AsyncIOScheduler(timezone=ZoneInfo(TIMEZONE))
-    _scheduler.add_job(
-        _run_daily_check,
-        trigger="interval",
-        minutes=3,
-        kwargs={"bot": application.bot},
-        id="automated_reminder_check",
-        replace_existing=True,
-    )
+
+    if check_interval > 0:
+        # Test Mode (runs every X minutes)
+        _scheduler.add_job(
+            _run_daily_check,
+            trigger="interval",
+            minutes=check_interval,
+            kwargs={"bot": application.bot},
+            id="automated_reminder_check",
+            replace_existing=True,
+        )
+        logger.info("Scheduler started in TEST MODE: checking every %d minutes (%s).", check_interval, TIMEZONE)
+    else:
+        # Production Mode (runs once daily at 8:00 AM Asia/Yangon)
+        _scheduler.add_job(
+            _run_daily_check,
+            trigger="cron",
+            hour=REMINDER_HOUR,
+            minute=REMINDER_MINUTE,
+            kwargs={"bot": application.bot},
+            id="automated_reminder_check",
+            replace_existing=True,
+        )
+        logger.info("Scheduler started in PRODUCTION MODE: checking daily at %02d:%02d (%s).", REMINDER_HOUR, REMINDER_MINUTE, TIMEZONE)
+
     _scheduler.start()
-    logger.info("Scheduler started: checking reminders every 3 minutes (%s).", TIMEZONE)
 
 
 def main() -> None:
