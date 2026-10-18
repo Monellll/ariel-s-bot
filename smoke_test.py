@@ -592,6 +592,41 @@ async def run_callback_tests():
 asyncio.run(run_callback_tests())
 
 # ===========================================================================
+# Test 15: Admin Teacher Management (/authorize and /revoke)
+# ===========================================================================
+print("\n--- Test 15: Admin Teacher Management ---")
+
+async def run_admin_mgmt_tests():
+    # Admin can authorize a new teacher by numeric ID
+    admin_update = MagicMock()
+    admin_update.effective_user.id = 7462033455
+    admin_update.message = AsyncMock()
+    ctx = MagicMock()
+    ctx.args = ["555666777"]
+
+    await bot.cmd_authorize(admin_update, ctx)
+    check("Teacher 555666777 authorized by admin", 555666777 in bot._authorized_users)
+
+    # Admin can revoke teacher access
+    await bot.cmd_revoke(admin_update, ctx)
+    check("Teacher 555666777 revoked by admin", 555666777 not in bot._authorized_users)
+
+    # Permanent admin cannot be revoked
+    ctx.args = ["7462033455"]
+    await bot.cmd_revoke(admin_update, ctx)
+    check("Permanent admin 7462033455 cannot be revoked", 7462033455 in bot.ADMIN_IDS)
+
+    # Non-admin cannot authorize
+    non_admin_update = MagicMock()
+    non_admin_update.effective_user.id = 999999999
+    non_admin_update.message = AsyncMock()
+    ctx.args = ["888888888"]
+    await bot.cmd_authorize(non_admin_update, ctx)
+    check("Non-admin cannot authorize others", 888888888 not in bot._authorized_users)
+
+asyncio.run(run_admin_mgmt_tests())
+
+# ===========================================================================
 # Summary
 # ===========================================================================
 print("\n" + "=" * 50)

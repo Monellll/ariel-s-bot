@@ -249,11 +249,53 @@ def _build_main_menu_keyboard(is_admin: bool = False) -> InlineKeyboardMarkup:
             InlineKeyboardButton("🗑️ Remove Student", callback_data="menu:delete_list:0"),
             InlineKeyboardButton("📖 How to Use", callback_data="menu:help"),
         ],
-        [
-            InlineKeyboardButton("🔄 Refresh Dashboard", callback_data="menu:home"),
-        ],
     ]
+    if is_admin:
+        buttons.append(
+            [InlineKeyboardButton("👥 Manage Teachers", callback_data="menu:teachers")]
+        )
+    buttons.append(
+        [InlineKeyboardButton("🔄 Refresh Dashboard", callback_data="menu:home")]
+    )
     return InlineKeyboardMarkup(buttons)
+
+
+def _render_teachers_list() -> tuple[str, InlineKeyboardMarkup]:
+    """Render the list of teachers and access control buttons for administrators."""
+    id_to_uname = {cid: uname for uname, cid in _chat_id_registry.items()}
+
+    lines = [
+        "👥 <b>Teacher & Administrator Access</b>",
+        "━━━━━━━━━━━━━━━━━━━━━",
+        "👑 <b>Permanent Administrators:</b>",
+    ]
+    for aid in sorted(ADMIN_IDS):
+        uname = id_to_uname.get(aid, "Admin")
+        lines.append(f"  • <code>{aid}</code> ({uname})")
+
+    other_teachers = sorted([uid for uid in _authorized_users if uid not in ADMIN_IDS])
+    lines.append("\n🎓 <b>Authorized Teachers:</b>")
+    if other_teachers:
+        for uid in other_teachers:
+            uname = id_to_uname.get(uid, "Teacher")
+            lines.append(f"  • <code>{uid}</code> ({uname})")
+    else:
+        lines.append("  <i>No additional teachers authorized yet.</i>")
+
+    lines.append("\n━━━━━━━━━━━━━━━━━━━━━")
+    lines.append("➕ <b>To add a new teacher:</b>")
+    lines.append("Type: <code>/authorize &lt;Telegram_ID&gt;</code>")
+    lines.append("<i>(or /authorize @username if they tapped Start)</i>")
+
+    buttons = []
+    for uid in other_teachers:
+        uname = id_to_uname.get(uid, str(uid))
+        buttons.append([
+            InlineKeyboardButton(f"❌ Revoke {uname} ({uid})", callback_data=f"teacher:revoke:{uid}")
+        ])
+
+    buttons.append([InlineKeyboardButton("⬅️ Back to Menu", callback_data="menu:home")])
+    return "\n".join(lines), InlineKeyboardMarkup(buttons)
 
 
 def _get_home_text(user_id: int, user_name: str) -> str:
@@ -638,8 +680,122 @@ async def cmd_delete(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     await update.message.reply_text(text, reply_markup=keyboard, parse_mode="HTML")
 
 
+async def cmd_authorize(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/authorize <user_id> or /authorize @username — Main admin grants teacher access."""
+    if not _is_admin(update):
+        await update.message.reply_text("❌ Only the bot administrator can authorize new teachers.")
+        return
+
+    args = context.args or []
+    if not args:
+        await update.message.reply_text(
+            "<b>Usage:</b> <code>/authorize &lt;Telegram_User_ID&gt;</code>\n\n"
+            "<i>Tip: Ask the teacher to tap /start in the bot, or get their numeric ID from @userinfobot.</i>",
+            parse_mode="HTML",
+        )
+        return
+
+    raw_id = args[0].strip()
+    target_id: int | None = None
+
+    if raw_id.startswith("@"):
+        target_username = raw_id.lower()
+        target_id = _chat_id_registry.get(target_username)
+        if not target_id:
+            await update.message.reply_text(
+                f"❌ <code>{html.escape(raw_id)}</code> hasn't tapped /start yet.\n"
+                "Please have them send /start to @ariel_english_bot first, or use their numeric ID.",
+                parse_mode="HTML",
+            )
+            return
+    else:
+        try:
+            target_id = int(raw_id)
+        except ValueError:
+            await update.message.reply_text("❌ Please provide a valid numeric Telegram ID or @username.")
+            return
+
+    _authorized_users.add(target_id)
+    _save_authorized_users()
+
+    # Reverse lookup username
+    id_to_uname = {cid: uname for uname, cid in _chat_id_registry.items()}
+    uname = id_to_uname.get(target_id, "Teacher")
+
+    await update.message.reply_text(
+        f"✅ <b>Teacher Authorized!</b>\n\n"
+        f"• <b>Telegram ID:</b> <code>{target_id}</code>\n"
+        f"• <b>Username:</b> <code>{uname}</code>\n\n"
+        "They now have full teacher privileges to upload rosters and send reminders.",
+        parse_mode="HTML",
+    )
+
+    # Attempt to notify the authorized teacher directly
+    try:
+        await context.bot.send_message(
+            chat_id=target_id,
+            text=(
+                "🎉 <b>Teacher Access Granted!</b>\n\n"
+                "The administrator has authorized your account.\n"
+                "Send /menu to open your class control panel!"
+            ),
+            parse_mode="HTML",
+        )
+    except Exception:
+        pass
+
+
+async def cmd_revoke(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/revoke <user_id> — Main admin removes teacher access."""
+    if not _is_admin(update):
+        await update.message.reply_text("❌ Only the bot administrator can revoke teacher access.")
+        return
+
+    args = context.args or []
+    if not args:
+        await update.message.reply_text(
+            "<b>Usage:</b> <code>/revoke &lt;Telegram_User_ID&gt;</code>",
+            parse_mode="HTML",
+        )
+        return
+
+    try:
+        target_id = int(args[0].strip().lstrip("@"))
+    except ValueError:
+        raw_user = args[0].strip().lower()
+        target_id = _chat_id_registry.get(raw_user if raw_user.startswith("@") else f"@{raw_user}")
+        if not target_id:
+            await update.message.reply_text("❌ Please provide a valid numeric Telegram ID.")
+            return
+
+    if target_id in ADMIN_IDS:
+        await update.message.reply_text("❌ Cannot revoke a permanent administrator.")
+        return
+
+    if target_id in _authorized_users:
+        _authorized_users.discard(target_id)
+        _save_authorized_users()
+        await update.message.reply_text(f"✅ Teacher access for <code>{target_id}</code> has been revoked.", parse_mode="HTML")
+    else:
+        await update.message.reply_text(f"ℹ️ User <code>{target_id}</code> is not in the authorized teachers list.", parse_mode="HTML")
+
+
+async def cmd_teachers(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/teachers — View list of teachers and access control."""
+    if not _is_admin(update):
+        await update.message.reply_text("❌ Only the bot administrator can view the teachers management list.")
+        return
+
+    text, keyboard = _render_teachers_list()
+    await update.message.reply_text(text, reply_markup=keyboard, parse_mode="HTML")
+
+
 async def cmd_auth(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """/auth <admin_id> — Authorize an additional teacher."""
+    """/auth — If admin, authorize a target; if non-admin, self-authorize using admin ID."""
+    if _is_admin(update) and context.args:
+        await cmd_authorize(update, context)
+        return
+
     user_id = update.effective_user.id
     args = context.args or []
     if not args:
@@ -839,6 +995,28 @@ async def handle_callback_query(
             text = f"✅ <b>Removed {sname} ({uname}) successfully.</b>\n\n" + text
             await _safe_edit_message(query, text, reply_markup=keyboard, parse_mode="HTML")
 
+    elif data == "menu:teachers":
+        if not is_admin:
+            await query.answer("❌ Admin access required.", show_alert=True)
+            return
+        text, keyboard = _render_teachers_list()
+        await _safe_edit_message(query, text, reply_markup=keyboard, parse_mode="HTML")
+
+    elif data.startswith("teacher:revoke:"):
+        if not is_admin:
+            await query.answer("❌ Admin access required.", show_alert=True)
+            return
+        target_id = int(data.split(":")[2])
+        if target_id in ADMIN_IDS:
+            await query.answer("❌ Cannot revoke permanent admin.", show_alert=True)
+            return
+        _authorized_users.discard(target_id)
+        _save_authorized_users()
+        await query.answer(f"✅ Revoked {target_id}!", show_alert=False)
+        text, keyboard = _render_teachers_list()
+        text = f"✅ <b>Revoked teacher {target_id} successfully.</b>\n\n" + text
+        await _safe_edit_message(query, text, reply_markup=keyboard, parse_mode="HTML")
+
     else:
         # Handles any legacy or unrecognized buttons by safely returning to home
         logger.info("Unrecognized callback '%s', returning to home.", data)
@@ -1004,6 +1182,7 @@ async def on_startup(application: Application) -> None:
                 BotCommand("check", "📨 Check & Send Reminders Now"),
                 BotCommand("delete", "🗑️ Remove Student from Roster"),
                 BotCommand("help", "📖 How to Use Ariel's Bot"),
+                BotCommand("teachers", "👥 Manage Teachers (Admin)"),
                 BotCommand("start", "🔄 Welcome / Restart Bot"),
             ]
         )
@@ -1055,6 +1234,9 @@ def main() -> None:
     app.add_handler(CommandHandler("check", cmd_check))
     app.add_handler(CommandHandler("delete", cmd_delete))
     app.add_handler(CommandHandler("auth", cmd_auth))
+    app.add_handler(CommandHandler("authorize", cmd_authorize))
+    app.add_handler(CommandHandler("revoke", cmd_revoke))
+    app.add_handler(CommandHandler("teachers", cmd_teachers))
 
     # Interactive buttons
     app.add_handler(CallbackQueryHandler(handle_callback_query))
