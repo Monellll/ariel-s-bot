@@ -550,45 +550,6 @@ async def run_concurrency_test():
 asyncio.run(run_concurrency_test())
 
 # ===========================================================================
-# Test 14: i18n Internationalization (Burmese & English)
-# ===========================================================================
-print("\n--- Test 14: i18n Internationalization (Burmese & English) ---")
-import i18n
-
-check("English button translation", i18n.t("btn_roster_status", "en") == "📊 Roster & Status")
-check("Burmese button translation", i18n.t("btn_roster_status", "my") == "📊 ကျောင်းသားစာရင်းနှင့် အခြေအနေ")
-check("Fallback to English if key missing in language", i18n.t("non_existent_key", "my") == "non_existent_key")
-
-# User language preference switching
-i18n.set_user_language(99999, "en")
-check("User language set to English", i18n.get_user_language(99999) == "en")
-i18n.set_user_language(99999, "my")
-check("User language switched to Burmese", i18n.get_user_language(99999) == "my")
-
-# Excel language column parsing
-with tempfile.TemporaryDirectory() as tmpdir:
-    test_xlsx = Path(tmpdir) / "lang_test.xlsx"
-    records_with_lang = [
-        {
-            "telegram_username": "@student_en",
-            "student_name": "English Student",
-            "due_date": datetime.date(2026, 11, 1),
-            "language": "english",
-        },
-        {
-            "telegram_username": "@student_my",
-            "student_name": "Burmese Student",
-            "due_date": datetime.date(2026, 11, 2),
-            "language": "burmese",
-        },
-    ]
-    excel_handler.save_excel(records_with_lang, str(test_xlsx))
-    loaded, _, _ = excel_handler.load_excel(str(test_xlsx))
-    check("Excel parses english language column", loaded[0]["language"] == "english")
-    check("Excel parses burmese language column", loaded[1]["language"] == "burmese")
-
-
-# ===========================================================================
 # Summary
 # ===========================================================================
 print("\n" + "=" * 50)

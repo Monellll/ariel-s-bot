@@ -151,24 +151,17 @@ Ariel's Bot/
 - `get_upcoming_reminders()` — Used by `/status` to display the next N reminders.
 - `load_sent_reminders()` / `save_sent_reminders()` — Atomic JSON persistence.
 
-### `i18n.py` — Internationalization (Burmese & English)
-- Full UI & message localization in **Burmese (မြန်မာဘာသာ)** and **English**.
-- Helper functions: `t(key, lang, **kwargs)` with automatic fallback, `get_user_language()`, `set_user_language()`.
-- Interactive language switcher in the main menu `[🌐 Language / ဘာသာစကား]` and `/language` command.
-- Persistent user language preferences stored in `data/user_languages.json`.
-
 ### `smoke_test.py` — Offline Tests
-- 14 test suites (58 assertions) covering:
+- 13 test suites (51 assertions) covering:
   - Valid rows, mixed valid/invalid, blank row skipping
   - Case-insensitive headers, missing chat_id handling
   - Date math, duplicate prevention
   - Mocked Telegram sending & error reporting
   - Multi-user isolation (separate files and histories)
   - Authorized user persistence & admin auto-authorization
-  - Dynamic reminder message formatting (English-only, Burmese-only, Bilingual)
+  - Dynamic bilingual reminder message formatting
   - `save_excel` serialization and schedule deletion persistence
   - Strict duplicate impossibility (in-run duplicates, 3x concurrent check race conditions, atomic persistence)
-  - Full i18n translation, language switching, and Excel language column parsing
 - Run with: `.\venv\Scripts\python.exe smoke_test.py`
 
 ---
