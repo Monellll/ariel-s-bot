@@ -949,7 +949,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 
 async def _run_daily_check(bot) -> None:
-    """Run daily automated check for all authorized teachers at 8:00 AM."""
+    """Run automated check for all authorized teachers."""
     if not _user_records:
         return
 
@@ -958,7 +958,7 @@ async def _run_daily_check(bot) -> None:
             continue
         _resolve_chat_ids(records)
         try:
-            await reminder_scheduler.daily_check(
+            res = await reminder_scheduler.daily_check(
                 bot=bot,
                 records=records,
                 owner_chat_id=user_id,
@@ -966,6 +966,19 @@ async def _run_daily_check(bot) -> None:
                 reminder_days=REMINDER_DAYS_BEFORE,
                 sent_reminders_path=_user_sent_reminders_path(user_id),
             )
+            if res.get("sent"):
+                sent_names = [
+                    html.escape(str(r.get("student_name", r.get("telegram_username", "Student"))))
+                    for r in res["sent"]
+                ]
+                await bot.send_message(
+                    chat_id=user_id,
+                    text=(
+                        f"⏰ <b>Automated Reminder Sent ({len(res['sent'])}):</b>\n"
+                        + "\n".join(f"• {name}" for name in sent_names)
+                    ),
+                    parse_mode="HTML",
+                )
         except Exception as exc:
             logger.error("Daily check failed for user %s: %s", user_id, exc)
 
@@ -1008,19 +1021,18 @@ async def on_startup(application: Application) -> None:
             except Exception as exc:
                 logger.warning("Could not load Excel for user %s: %s", user_id, exc)
 
-    # Start APScheduler (Daily at 8:00 AM Asia/Yangon)
+    # Start APScheduler (Runs every 3 minutes for testing)
     _scheduler = AsyncIOScheduler(timezone=ZoneInfo(TIMEZONE))
     _scheduler.add_job(
         _run_daily_check,
-        trigger="cron",
-        hour=REMINDER_HOUR,
-        minute=REMINDER_MINUTE,
+        trigger="interval",
+        minutes=3,
         kwargs={"bot": application.bot},
-        id="daily_reminder_check",
+        id="automated_reminder_check",
         replace_existing=True,
     )
     _scheduler.start()
-    logger.info("Scheduler started for daily checks at %02d:%02d (%s).", REMINDER_HOUR, REMINDER_MINUTE, TIMEZONE)
+    logger.info("Scheduler started: checking reminders every 3 minutes (%s).", TIMEZONE)
 
 
 def main() -> None:

@@ -276,8 +276,9 @@ async def daily_check(
 
             days_until_due = (due_date - today).days
 
-            # Only send when exactly REMINDER_DAYS_BEFORE
-            if days_until_due != reminder_days:
+            # Send when within the reminder window (0 to reminder_days, or 0 to 5 in test mode)
+            max_days = reminder_days if reminder_days > 0 else 5
+            if not (0 <= days_until_due <= max_days):
                 not_due_records.append({**rec, "days_until_due": days_until_due})
                 continue
 
