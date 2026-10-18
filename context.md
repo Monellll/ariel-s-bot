@@ -6,57 +6,47 @@
 
 ## 🎯 Purpose & Workflow
 
-A simple Telegram bot supporting multiple independent users (e.g. teachers or class administrators). Each user manages their own Excel file, student roster, payment deadlines, and reminder history separately.
+A clean, friendly Telegram bot supporting multiple independent users (e.g. teachers or class administrators). Each user manages their own Excel file, student roster, payment deadlines, and reminder history separately.
 
 ### 🔑 Complete Workflow & Architecture:
 
-1. **Admin Access & Fallback:**
+1. **Teacher Access & Admin Fallback:**
    - The user whose numeric Telegram ID matches `ADMIN_TELEGRAM_ID` in `.env` is auto-authorized on start.
-   - Permanent fallback IDs (`ADMIN_IDS = {ADMIN_TELEGRAM_ID, 7462033455}`) guarantee that admin Myat (`7462033455`) is always recognized and authorized, even if Railway or environment variables default to `0` or `123456789`.
+   - Permanent fallback IDs (`ADMIN_IDS = {ADMIN_TELEGRAM_ID, 7462033455}`) guarantee that admin Myat (`7462033455`) is always recognized as teacher/admin even if Railway env vars default to `0` or `123456789`.
 
-2. **Student Auto-Registration (`@username` → `chat_id` capture):**
-   - Because the Telegram Bot API cannot message users purely by username without a known numeric `chat_id` (and prior interaction), the bot automatically captures chat IDs.
-   - When a student opens the bot and sends `/start`, the bot extracts their Telegram username and numeric chat ID and saves it to `data/chat_id_registry.json`.
-   - The student receives a confirmation:
-     > *"✅ You are now registered! You will receive automatic payment reminders when your teacher schedules them."*
+2. **Clean Student Experience:**
+   - When a student opens the bot and sends `/start`, the bot captures their Telegram username and numeric chat ID automatically to `data/chat_id_registry.json`.
+   - The student receives a warm, friendly confirmation without any technical jargon or admin prompts:
+     > *"👋 Hello, [Name]! Welcome to Ariel's English Class! 🤍 You're all set! You will receive a gentle reminder here whenever your monthly tuition fee is coming up. No further action is needed from you. Have a wonderful day! ✨"*
 
-3. **New Teachers (Authorization Flow):**
-   - When a new unauthorized user sends `/start`, the message confirms registration and also prompts:
-     > *"🎓 Are you a teacher/admin? Enter the Admin Chat ID below to get full access."*
-   - Entering an authorized admin ID adds them to `data/authorized_users.json` and notifies the Admin.
-   - Incorrect entries reject access.
+3. **Streamlined Teacher Control Panel:**
+   - When an authorized teacher sends `/start`, `/menu`, or `/roster`:
+     - Shows a clean overview: Total Students, Connected on Telegram, Needs to Tap Start.
+     - 4 clean navigation buttons:
+       - `[📋 Student Roster]` — View list of students, due dates, and connection status.
+       - `[📨 Send Reminders Now]` — Instantly check and send reminders for due students.
+       - `[🗑️ Remove Student]` — Interactive paginated deletion with one-tap removal (synced back to Excel).
+       - `[📖 How to Use]` — Step-by-step Excel formatting and student onboarding guide.
+       - `[🔄 Refresh Dashboard]` — Refreshes the dashboard stats.
 
 4. **Excel Upload (Teachers):**
-   - Teachers only need to provide **`telegram_username`** and **`due_date`** (optional: `student_name`).
+   - Teachers only need to provide **`student_name`**, **`telegram_username`**, and **`due_date`** (format: YYYY-MM-DD).
    - `telegram_chat_id` is **NOT required** in the Excel file!
    - On upload:
      - The file is validated via `excel_handler.py`.
      - Valid records are saved to `data/{user_id}/students.xlsx` and loaded into `_user_records[user_id]`.
-     - `_resolve_chat_ids()` automatically cross-references `data/chat_id_registry.json` and maps `@username` to `chat_id`.
-     - The bot reports: Total records, valid count, auto-matched count, and a list of students who haven't tapped `/start` yet.
+     - `_resolve_chat_ids()` cross-references `data/chat_id_registry.json` and maps `@username` to `chat_id`.
+     - The bot reports total students, linked count, and names of students who still need to tap `/start`.
 
-5. **Separate Reminders & Isolation:**
-   - Each teacher's data is isolated in `data/{user_id}/`.
-   - Each user has their own reminder history in `data/{user_id}/sent_reminders.json`.
-   - Scheduled checks independently evaluate each teacher's roster.
-   - Before each check, `_resolve_chat_ids()` runs again so students who tapped `/start` after the upload are picked up dynamically.
-   - Reminders are sent 5 days before deadlines (or today in testing mode).
-   - Warnings (unregistered students, send failures) go to the file owner (`owner_chat_id`).
+5. **Automated Reminders:**
+   - Every morning at 8:00 AM (Asia/Yangon), the scheduler checks who is due in 5 days (`REMINDER_DAYS_BEFORE = 5`).
+   - Sends a polite bilingual reminder message (English + Myanmar).
 
-6. **Interactive Control Panel & Resilient Menu UI:**
-   - `/start`, `/help`, or `/menu`: Interactive Control Panel with inline keyboard navigation:
-     - `[📊 Roster & Status]` — View loaded count, Chat ID linkage, and next 5 upcoming reminders.
-     - `[⚙️ Scheduler]` — Live countdown, check interval, and full schedule queue.
-     - `[📨 Check & Send Now]` — Immediately evaluate and send due reminders.
-     - `[🗑️ Delete Reminders]` — Interactive list with pagination and one-tap schedule deletion (persisted back to `students.xlsx`).
-     - `[📜 Sent History]` — View history and clear sent history to re-test.
-     - `[🔄 Refresh Menu]` — Live refresh of timer countdown and student counters.
-   - **`_safe_edit_message` Helper**: Automatically falls back to plain text if Markdown entity parsing fails (`BadRequest: Can't parse entities`), preventing unresponsive button clicks due to special characters in names or usernames.
-   - **Protected Query Answers**: `query.answer()` calls are protected with exception guards so expired query IDs do not break UI transitions.
-   - **Legacy Callback Redirection**: Any outdated or unrecognized callback button seamlessly redirects back to the main menu dashboard.
-   - `/delete` or `/removereminder`: Directly opens the interactive reminder deletion UI.
-   - `/status`, `/scheduler`, `/check`, `/history`, `/clearsent`: Direct text shortcuts that also feature the interactive menu buttons.
-   - `/users`: (Admin only) View authorized teachers and auto-captured student registry stats.
+6. **Bulletproof Technical Resilience:**
+   - **HTML Mode (`parse_mode="HTML"`)**: Prevents Telegram entity parsing errors caused by underscores in usernames (e.g. `@thiri_test`, `@myat_min`) or brackets in messages.
+   - **`_safe_edit_message` Helper**: Automatically falls back to plain text if formatting ever fails, guaranteeing buttons always update the screen.
+   - **`run_polling(drop_pending_updates=True)`**: Cleans out old stuck backlogs on startup.
+   - **Single-Worker Cloud Deployment**: Uses `railway.toml` with `startCommand = "python bot.py"` (redundant `Procfile` removed) to eliminate duplicate instance conflicts (HTTP 409).
 
 ---
 
@@ -69,7 +59,7 @@ Ariel's Bot/
 ├── TESTING_GUIDE.md                       # Comprehensive 7-step live testing roadmap
 ├── test_upload.xlsx                       # Sample test Excel generated by create_test_xlsx.py
 └── telegram-payment-reminder/             # The application
-    ├── bot.py                             # Entry point: Multi-user Telegram handlers + Menu UI + APScheduler
+    ├── bot.py                             # Entry point: Multi-user Telegram handlers + Friendly UI + APScheduler
     ├── excel_handler.py                   # Excel parsing, validation & saving (pure Python, openpyxl)
     ├── reminder_scheduler.py              # Daily check logic, dynamic bilingual formatting, JSON persistence + lock
     ├── smoke_test.py                      # Offline unit/smoke tests (14 test suites, 56 assertions)
@@ -81,7 +71,6 @@ Ariel's Bot/
     ├── .env.example                       # Template for .env
     ├── .gitignore
     ├── README.md                          # User-facing docs & setup instructions
-    ├── Procfile                           # Railway / Heroku worker process
     ├── railway.toml                       # Railway deployment config
     ├── data/
     │   ├── authorized_users.json          # Persisted authorized user IDs (git-ignored)
@@ -94,82 +83,6 @@ Ariel's Bot/
     │   └── bot.log                        # Rotating log file (git-ignored)
     └── venv/                              # Python virtual environment (git-ignored)
 ```
-
----
-
-## 🧩 Module Responsibilities
-
-### `bot.py` — Main Entry Point & Interactive Menu UI
-- Loads env vars via `python-dotenv`.
-- Sets up rotating file + console logging (`logs/bot.log`).
-- Manages multi-user in-memory states:
-  - `_user_records: dict[int, list[dict]]`
-  - `_authorized_users: set[int]`
-  - `_pending_auth: set[int]`
-  - `_chat_id_registry: dict[str, int]` (mapping lowercase `@username` to `chat_id`)
-- **Chat ID Auto-Resolution**:
-  - `_load_chat_id_registry()` / `_save_chat_id_registry()`
-  - `_register_chat_id(username, chat_id)`: registers user whenever anyone runs `/start`.
-  - `_resolve_chat_ids(records)`: automatically matches records to known chat IDs.
-- **Resilient Menu UI & Callback Handling**:
-  - `_safe_edit_message`: attempts Markdown formatting first, cleanly falls back to unparsed plain text if entity parsing errors occur, and ignores `Message is not modified`.
-  - Inline keyboards for navigation: `[📊 Roster & Status]`, `[⚙️ Scheduler]`, `[📨 Check & Send Now]`, `[🗑️ Delete Reminders]`, `[📜 Sent History]`, `[🔄 Refresh Menu]`.
-  - Handled via `CallbackQueryHandler(handle_callback_query)`.
-- **Individual Schedule Deletion**:
-  - `/delete` command or `[🗑️ Delete Reminders]` button opens paginated roster list.
-  - Interactive confirmation dialog (`[🗑️ Yes, Delete]` / `[❌ Cancel]`).
-  - Calls `excel_handler.save_excel(...)` to persist deletions to disk immediately.
-- **Commands**:
-  - `/start`, `/help`, `/menu`: Main Menu dashboard.
-  - `/status`: Loaded student count and upcoming deadlines.
-  - `/scheduler`, `/scheduledata`: APScheduler status, live timer countdown, and active schedule queue.
-  - `/check`, `/runcheck`: Manual on-demand check with detailed live report.
-  - `/history`: View sent reminder keys (`chat_id:due_date`).
-  - `/clearsent`, `/resethistory`: Clear sent history to re-test reminders.
-  - `/users`: Admin-only view of authorized teachers and registry stats.
-- Handles document uploads (`handle_document`) storing each user's `.xlsx` in `data/{user_id}/students.xlsx`.
-- Handles text input (`handle_text`) to verify the Admin Chat ID for teacher authorization.
-- Runs `_run_daily_check` which resolves missing IDs, iterates each user's roster, and calls `reminder_scheduler.daily_check`.
-
-### `excel_handler.py` — Excel Parsing, Validation & Persistence
-- Pure Python + openpyxl. No Telegram dependency.
-- Reads `.xlsx`, maps columns case-insensitively, validates each row.
-- Required columns: `telegram_username`, `due_date`.
-- Optional columns: `student_name` (fallback to username), `telegram_chat_id` (auto-resolved if missing), `start_date` / `class_start_date` (defaults to July 14th if omitted).
-- **Duplicate row defense**: Automatically skips identical student + due date entries on file load.
-- **`save_excel(records, file_path)`**: Serializes student records back to `.xlsx` upon deletion.
-- Returns `(valid_records, invalid_count, error_messages)`.
-- Skips blank rows silently. Reports bad rows without crashing.
-
-### `reminder_scheduler.py` — Daily Check, Messaging & Deduplication
-- **Dynamic Bilingual Message Template (English + Myanmar)**:
-  - English: `"Hi!\n\nJust a friendly reminder that the fee for the class is due on {due_date_en}.\n\nNo worries at all, just a gentle reminder.\n\nTake your time! 🤍\n\nHello, ဒီလအတွက် သင်တန်းကြေးလေးက {due_date_mm} ရက်နေ့ နောက်ဆုံးထားပြီး ပေးသွင်းရပါမယ်ရှင့်။\n\nမလောပါဘူးရှင် remind လုပ်တာပါနော်🤍"`
-  - Automatically formats ordinal dates (e.g. `October 17th`) and Myanmar date labels (`October 17 ရက်နေ့`).
-- **5-Layer Deduplication Architecture**:
-  1. `_daily_check_lock = asyncio.Lock()`: Serializes all checks across the application.
-  2. Ingest deduplication in `excel_handler.py`.
-  3. In-run memory deduplication via `seen_in_run: set[str]`.
-  4. Immediate atomic disk persistence (`os.fsync` + `os.replace`) on **every** successful message send.
-  5. In-memory fallback cache `_memory_sent_cache` preventing data loss from file read errors.
-- `daily_check(bot, records, owner_chat_id, ...)`:
-  - Evaluates records matching `REMINDER_DAYS_BEFORE`.
-  - Dispatches messages, persists keys, and notifies owners of missing IDs or failures.
-- `get_upcoming_reminders()` — Used by `/status` to display the next N reminders.
-- `load_sent_reminders()` / `save_sent_reminders()` — Atomic JSON persistence.
-
-### `smoke_test.py` — Offline Tests
-- 14 test suites (56 assertions) covering:
-  - Valid rows, mixed valid/invalid, blank row skipping
-  - Case-insensitive headers, missing chat_id handling
-  - Date math, duplicate prevention
-  - Mocked Telegram sending & error reporting
-  - Multi-user isolation (separate files and histories)
-  - Authorized user persistence & admin auto-authorization
-  - Dynamic bilingual reminder message formatting
-  - `save_excel` serialization and schedule deletion persistence
-  - Strict duplicate impossibility (in-run duplicates, 3x concurrent check race conditions, atomic persistence)
-  - Callback query navigation, markdown parsing fallback, and admin authorization guards
-- Run with: `.\venv\Scripts\python.exe smoke_test.py`
 
 ---
 
@@ -187,36 +100,8 @@ Ariel's Bot/
 ## 🛠️ Deployment & Remote
 
 * **Git Repository:** `https://github.com/Monellll/ariel-s-bot.git` (branch `main`)
-* **Cloud Host:** Railway (`Procfile: web: python bot.py`)
-* **Single-Instance Rule:** Never run `python bot.py` locally while the Railway service is active, otherwise Telegram terminates polling requests with `HTTP 409 Conflict`.
-* **Libraries:**
-  - `python-telegram-bot` ≥20.0 (Async Telegram bot framework)
-  - `openpyxl` ≥3.1.0 (Excel parsing and generation)
-  - `APScheduler` ≥3.10.0 (Scheduled daily/interval checks)
-  - `python-dotenv` ≥1.0.0 (Environment management)
-  - `zoneinfo` (Python stdlib timezone handling)
-
----
-
-## 🚧 Current State & Known TODOs
-
-> [!WARNING]
-> **The bot is currently in TESTING MODE with two temporary overrides:**
-
-1. **`REMINDER_DAYS_BEFORE` defaults to `0`** in `bot.py` line 53 — sends reminders for students due *today* instead of 5 days out. Change back to `"5"` for production.
-
-2. **Scheduler runs every 3 minutes** (interval trigger) instead of once daily at 08:00 via cron in `bot.py`. Revert to cron for production:
-```python
-_scheduler.add_job(
-    _run_daily_check,
-    trigger="cron",
-    hour=8,
-    minute=0,
-    kwargs={"bot": application.bot},
-    id="daily_reminder_check",
-    replace_existing=True,
-)
-```
+* **Cloud Host:** Railway (`railway.toml: startCommand = "python bot.py"`)
+* **Single-Instance Rule:** Keep local bot process stopped while Railway is running to avoid Telegram `HTTP 409 Conflict`.
 
 ---
 
