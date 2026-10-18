@@ -46,8 +46,10 @@ A clean, friendly Telegram bot supporting multiple independent users (e.g. teach
      - The bot displays an instant **Upload Summary Card** showing total students, linked count, and names of pending students.
 
 5. **Automated Reminders & Flexible Window:**
-   - **Background Scheduler:** Currently checks every 3 minutes for automated live testing (configured via APScheduler).
-   - **Reminder Window:** Reminds students whose fee is due **within the reminder window (0 to 5 days)** so students due today or within 5 days are never skipped.
+   - **Background Scheduler:** Dynamically configured via `CHECK_INTERVAL_MINUTES`:
+     - If `CHECK_INTERVAL_MINUTES=0` (or not set): Runs in **Production Mode** once daily at 8:00 AM (`Asia/Yangon`).
+     - If `CHECK_INTERVAL_MINUTES > 0`: Runs in **Test Mode** (e.g., checks every 3 minutes).
+   - **Reminder Window:** Reminds students whose fee is due **within the reminder window (0 to `REMINDER_DAYS_BEFORE` days, default 5)** so students due today or within 5 days are never skipped.
    - **Bilingual Message:** Sends a polite bilingual reminder message (English + Myanmar).
    - **Teacher Alert on Auto-Send:** When the background job delivers reminders, it automatically notifies the teacher with the student names.
    - **Zero Duplicate Spam:** Canonical key `{chat_id}:{due_date}` saved atomically to `sent_reminders.json` prevents duplicate messages.
@@ -106,6 +108,7 @@ Ariel's Bot/
 | `ADMIN_TELEGRAM_ID` | *(required)* | Numeric Telegram user ID of the ONE permanent admin |
 | `TIMEZONE` | `Asia/Yangon` | Timezone for date math and scheduling |
 | `REMINDER_DAYS_BEFORE` | `5` | Maximum days before due date to trigger reminder |
+| `CHECK_INTERVAL_MINUTES` | `0` | Scheduler mode: `0` = Daily 8:00 AM production cron; `> 0` = Test interval every X minutes |
 
 ---
 
