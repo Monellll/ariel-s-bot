@@ -550,6 +550,48 @@ async def run_concurrency_test():
 asyncio.run(run_concurrency_test())
 
 # ===========================================================================
+# Test 14: Menu UI callbacks & Authorization guards
+# ===========================================================================
+print("\n--- Test 14: Menu UI callbacks & Authorization guards ---")
+import bot
+
+mock_update = MagicMock()
+mock_user = MagicMock()
+mock_user.id = 7462033455
+mock_update.effective_user = mock_user
+
+check("Admin 7462033455 recognized by _is_admin", bot._is_admin(mock_update))
+check("Admin 7462033455 recognized by _is_authorized", bot._is_authorized(mock_update))
+
+async def run_callback_tests():
+    # Test safe edit markdown fallback on BadRequest
+    mock_query = AsyncMock()
+    from telegram.error import BadRequest
+    mock_query.edit_text.side_effect = [BadRequest("Can't parse entities"), None]
+    await bot._safe_edit_message(mock_query, "Bad *markdown [test", None, "Markdown")
+    check("Markdown parse error cleanly falls back to plain text", mock_query.edit_text.call_count == 2)
+
+    # Test handle_callback_query with menu:home
+    cb_update = MagicMock()
+    cb_query = AsyncMock()
+    cb_query.from_user.id = 7462033455
+    cb_query.from_user.first_name = "Myat"
+    cb_query.data = "menu:home"
+    cb_update.callback_query = cb_query
+    ctx = MagicMock()
+
+    await bot.handle_callback_query(cb_update, ctx)
+    check("Callback menu:home handled successfully", cb_query.edit_text.called)
+
+    # Test unknown/legacy callback graceful handling
+    cb_query.reset_mock()
+    cb_query.data = "menu:language"
+    await bot.handle_callback_query(cb_update, ctx)
+    check("Legacy callback gracefully routes back to menu", cb_query.edit_text.called)
+
+asyncio.run(run_callback_tests())
+
+# ===========================================================================
 # Summary
 # ===========================================================================
 print("\n" + "=" * 50)

