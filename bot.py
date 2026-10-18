@@ -296,7 +296,7 @@ def _render_teachers_list() -> tuple[str, InlineKeyboardMarkup]:
 
 
 def _get_home_text(user_id: int, user_name: str) -> str:
-    """Friendly dashboard summary for teachers."""
+    """Friendly, modern dashboard summary for teachers."""
     records = _user_records.get(user_id, [])
     _resolve_chat_ids(records)
     total = len(records)
@@ -305,34 +305,38 @@ def _get_home_text(user_id: int, user_name: str) -> str:
 
     safe_name = html.escape(user_name)
     lines = [
-        f"👋 <b>Welcome, {safe_name}!</b>",
-        "",
-        "🎓 <b>Ariel's English Class — Reminder Dashboard</b>",
+        "🎓 <b>Ariel's English Class</b>",
         "━━━━━━━━━━━━━━━━━━━━━",
-        f"👥 <b>Total Students:</b> {total}",
-        f"✅ <b>Connected on Telegram:</b> {linked}",
+        f"👋 Welcome, <b>{safe_name}</b>!\n",
+        "📊 <b>Class Overview:</b>",
+        f"• Total Students: <b>{total}</b>",
+        f"• Connected on Telegram: <b>{linked}</b> ✅",
     ]
     if missing > 0:
-        lines.append(f"⚠️ <b>Needs to tap Start:</b> {missing}")
+        lines.append(f"• Waiting to Tap Start: <b>{missing}</b> ⚠️")
+
     lines += [
-        "━━━━━━━━━━━━━━━━━━━━━",
-        f"⏰ <b>Schedule:</b> Reminders are sent automatically <b>{REMINDER_DAYS_BEFORE} days</b> before each student's due date at 8:00 AM.",
         "",
-        "📤 <i>Tip: Send any <code>.xlsx</code> file anytime to update your student list.</i>",
-        "Choose an option below:",
+        "⏰ <b>Reminder Automation:</b>",
+        "Automated checks run daily for students due within <b>5 days</b>.",
+        "",
+        "💡 <i>Tip: Send or drag & drop any <code>.xlsx</code> file anytime to update your roster.</i>",
+        "Choose an action below:",
     ]
     return "\n".join(lines)
 
 
 def _render_roster_text(user_id: int) -> str:
-    """Clean summary of student roster and status."""
+    """Clean, beautifully organized summary of student roster and status."""
     records = _user_records.get(user_id, [])
     total = len(records)
     if total == 0:
         return (
-            "📋 <b>Your Student Roster</b>\n\n"
+            "📋 <b>Your Student Roster</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━━\n\n"
             "<i>No student roster loaded yet.</i>\n\n"
-            "📤 <b>To get started:</b> Send me an Excel file (<code>.xlsx</code>) with your students' names, Telegram usernames, and payment due dates!"
+            "📤 <b>To get started:</b>\n"
+            "Simply send or attach your Excel file (<code>.xlsx</code>) right here in this chat!"
         )
 
     _resolve_chat_ids(records)
@@ -340,12 +344,11 @@ def _render_roster_text(user_id: int) -> str:
     missing = total - linked
 
     lines = [
-        "📋 <b>Your Student Roster</b>",
-        f"Total: <b>{total}</b> students (✅ {linked} connected | ⚠️ {missing} pending)",
-        "",
+        "📋 <b>Student Roster</b>",
+        "━━━━━━━━━━━━━━━━━━━━━",
+        f"📊 <b>Summary:</b> <b>{total}</b> total  •  ✅ <b>{linked}</b> ready  •  ⚠️ <b>{missing}</b> pending\n",
     ]
 
-    # Show upcoming students sorted by due date
     today = datetime.datetime.now(ZoneInfo(TIMEZONE)).date()
     sorted_recs = sorted(records, key=lambda r: r.get("due_date") or datetime.date.max)
 
@@ -358,24 +361,27 @@ def _render_roster_text(user_id: int) -> str:
         if due:
             days = (due - today).days
             if days == 0:
-                due_info = "<b>Due Today!</b>"
-            elif days > 0:
-                due_info = f"due in {days}d ({due})"
+                due_info = "Due Today 🚨"
+            elif days == 1:
+                due_info = f"Due tomorrow ({due})"
+            elif days > 1:
+                due_info = f"Due in {days}d ({due})"
             else:
-                due_info = f"due {due}"
+                due_info = f"Overdue ({due})"
         else:
-            due_info = "No date"
+            due_info = "No date set"
 
-        status_badge = "✅" if has_chat else "⚠️"
-        lines.append(f"{i}. {status_badge} <b>{sname}</b> (<code>{uname}</code>) — {due_info}")
+        status_icon = "✅" if has_chat else "⚠️"
+        lines.append(f"<b>{i}. {sname}</b> (<code>{uname}</code>)")
+        lines.append(f"   {status_icon} <i>{due_info}</i>\n")
 
     if len(sorted_recs) > 15:
-        lines.append(f"\n<i>… and {len(sorted_recs) - 15} more students.</i>")
+        lines.append(f"<i>… and {len(sorted_recs) - 15} more student(s).</i>\n")
 
     if missing > 0:
-        lines.append("\n💡 <i>Students with ⚠️ simply need to open @ariel_english_bot and tap Start.</i>")
+        lines.append("💡 <i>Students marked with ⚠️ simply need to open @ariel_english_bot and tap Start.</i>")
 
-    return "\n".join(lines)
+    return "\n".join(lines).strip()
 
 
 # Alias for backward compatibility
@@ -385,30 +391,32 @@ _render_status_text = _render_roster_text
 def _render_help_text() -> str:
     """Clear, step-by-step user guide."""
     return (
-        "📖 <b>How to Use Ariel's Reminder Bot</b>\n\n"
-        "<b>1. Prepare Your Excel File (.xlsx):</b>\n"
-        "Your spreadsheet only needs 3 columns:\n"
-        "• <code>student_name</code> — (e.g. Thiri Hlaing)\n"
-        "• <code>telegram_username</code> — (e.g. @thiri_test)\n"
-        "• <code>due_date</code> — (format: YYYY-MM-DD, e.g. 2026-10-25)\n\n"
-        "<b>2. Upload Your File:</b>\n"
-        "Simply send or drag-and-drop your <code>.xlsx</code> file directly into this chat anytime!\n\n"
-        "<b>3. Have Students Tap Start:</b>\n"
-        "Tell your students to search for <b>@ariel_english_bot</b> and tap <b>Start</b>. The bot will automatically link them!\n\n"
-        "<b>4. Automated Delivery:</b>\n"
-        f"Every day at 8:00 AM, the bot checks due dates and sends a polite bilingual reminder (English + Myanmar) {REMINDER_DAYS_BEFORE} days before payment is due."
+        "📖 <b>How to Use Ariel's Reminder Bot</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "<b>1️⃣ Prepare Your Spreadsheet (.xlsx)</b>\n"
+        "Your Excel file only needs 3 columns:\n"
+        "• <code>student_name</code> — (e.g. <i>Thiri Hlaing</i>)\n"
+        "• <code>telegram_username</code> — (e.g. <i>@thiri_test</i>)\n"
+        "• <code>due_date</code> — (format: <i>YYYY-MM-DD</i>, e.g. <i>2026-10-25</i>)\n\n"
+        "<b>2️⃣ Upload Anytime</b>\n"
+        "Simply send or drag & drop your <code>.xlsx</code> file directly into this chat anytime! The bot automatically syncs it.\n\n"
+        "<b>3️⃣ Student Linking</b>\n"
+        "Tell your students to search for <b>@ariel_english_bot</b> and tap <b>Start</b>. The bot automatically links their account!\n\n"
+        "<b>4️⃣ Automated Reminders</b>\n"
+        "The bot automatically checks due dates and sends polite bilingual reminders (English + Myanmar) 5 days before payment is due."
     )
 
 
 def _render_delete_list(
     user_id: int, page: int = 0
 ) -> tuple[str, InlineKeyboardMarkup]:
-    """Render list of students with one-tap remove buttons."""
+    """Render list of students with clean one-tap remove buttons."""
     records = _user_records.get(user_id, [])
     if not records:
         text = (
-            "🗑️ <b>Remove a Student</b>\n\n"
-            "<i>No students currently in your roster.</i>\n"
+            "🗑️ <b>Remove a Student</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━━\n\n"
+            "<i>No students currently in your roster.</i>\n\n"
             "Upload an Excel file to add students."
         )
         keyboard = InlineKeyboardMarkup(
@@ -426,17 +434,18 @@ def _render_delete_list(
 
     lines = [
         "🗑️ <b>Remove a Student</b>",
-        f"Showing {start_idx+1}–{end_idx} of {total_records} student(s).",
-        "Tap a student below to remove them:\n",
+        "━━━━━━━━━━━━━━━━━━━━━",
+        f"Showing <b>{start_idx+1}–{end_idx}</b> of <b>{total_records}</b> student(s).",
+        "Select a student below to remove them:\n",
     ]
 
     buttons = []
     for i, rec in enumerate(page_records, start=start_idx):
         uname = html.escape(str(rec.get("telegram_username", f"Student {i+1}")))
         sname = html.escape(str(rec.get("student_name", uname)))
-        due = rec.get("due_date")
-        lines.append(f"{i+1}. <b>{sname}</b> (<code>{uname}</code>) — Due: <code>{due}</code>")
-        label = f"❌ {sname} ({uname})"[:30]
+        due = rec.get("due_date", "No date")
+        lines.append(f"<b>{i+1}. {sname}</b> (<code>{uname}</code>) • Due: <code>{due}</code>")
+        label = f"❌ Remove {sname}"[:30]
         buttons.append(
             [InlineKeyboardButton(label, callback_data=f"del:ask:{i}:{page}")]
         )
@@ -464,6 +473,7 @@ def _render_delete_list(
         [InlineKeyboardButton("⬅️ Back to Menu", callback_data="menu:home")]
     )
     return "\n".join(lines), InlineKeyboardMarkup(buttons)
+
 
 
 # ---------------------------------------------------------------------------
@@ -586,6 +596,59 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     await update.message.reply_text(text, reply_markup=keyboard, parse_mode="HTML")
 
 
+def _build_check_report(res: dict, today: datetime.date) -> str:
+    """Build a clean, user-friendly reminder check report."""
+    lines = [
+        "📨 <b>Reminder Check Report</b>",
+        "━━━━━━━━━━━━━━━━━━━━━",
+        f"📅 <b>Date:</b> <code>{today}</code>  •  🎯 <b>Window:</b> Next 5 days\n",
+    ]
+
+    if res.get("sent"):
+        lines.append(f"✅ <b>Delivered Reminders ({len(res['sent'])}):</b>")
+        for r in res["sent"][:10]:
+            sname = html.escape(str(r.get("student_name", "")))
+            uname = html.escape(str(r.get("telegram_username", "")))
+            lines.append(f"  • <b>{sname}</b> (<code>{uname}</code>) — Due: <code>{r.get('due_date')}</code>")
+        lines.append("")
+
+    if res.get("already_sent"):
+        lines.append(f"ℹ️ <b>Already Sent Earlier Today ({len(res['already_sent'])}):</b>")
+        for r in res["already_sent"][:10]:
+            sname = html.escape(str(r.get("student_name", "")))
+            lines.append(f"  • {sname} — Due: <code>{r.get('due_date')}</code>")
+        lines.append("")
+
+    if res.get("not_due"):
+        lines.append(f"⏳ <b>Not Due Yet ({len(res['not_due'])}):</b>")
+        for r in res["not_due"][:6]:
+            sname = html.escape(str(r.get("student_name", "")))
+            days = r.get("days_until_due", "?")
+            lines.append(f"  • {sname} — in {days} days")
+        if len(res["not_due"]) > 6:
+            lines.append(f"  <i>… and {len(res['not_due']) - 6} more.</i>")
+        lines.append("")
+
+    if res.get("no_chat_id"):
+        lines.append(f"⚠️ <b>Waiting to Tap Start ({len(res['no_chat_id'])}):</b>")
+        for r in res["no_chat_id"][:10]:
+            uname = html.escape(str(r.get("telegram_username", "")))
+            lines.append(f"  • <code>{uname}</code> (Cannot deliver until student taps Start)")
+        lines.append("")
+
+    if res.get("failed"):
+        lines.append(f"❌ <b>Delivery Issues ({len(res['failed'])}):</b>")
+        for r, err in res["failed"][:5]:
+            uname = html.escape(str(r.get("telegram_username", "Student")))
+            lines.append(f"  • <code>{uname}</code>: {html.escape(str(err))}")
+        lines.append("")
+
+    if not res.get("sent") and not res.get("already_sent"):
+        lines.append("🎉 <i>No student reminders were pending right now!</i>")
+
+    return "\n".join(lines).strip()
+
+
 async def cmd_check(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """/check — Manually send reminders for students due right now."""
     if not _is_authorized(update):
@@ -618,52 +681,11 @@ async def cmd_check(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await msg.edit_text(f"❌ Check failed: {exc}")
         return
 
-    lines = [
-        "📨 <b>Reminder Check Report</b>",
-        f"📅 Date: <code>{today}</code> (Target: <code>{REMINDER_DAYS_BEFORE}</code> days before due)",
-        "",
-    ]
-
-    if res["sent"]:
-        lines.append(f"✅ <b>Sent ({len(res['sent'])}):</b>")
-        for r in res["sent"][:10]:
-            sname = html.escape(str(r.get("student_name", "")))
-            uname = html.escape(str(r.get("telegram_username", "")))
-            lines.append(f"  • {sname} (<code>{uname}</code>) — due {r.get('due_date')}")
-
-    if res["already_sent"]:
-        lines.append(f"\nℹ️ <b>Already Sent Earlier Today ({len(res['already_sent'])}):</b>")
-        for r in res["already_sent"][:10]:
-            sname = html.escape(str(r.get("student_name", "")))
-            lines.append(f"  • {sname} — due {r.get('due_date')}")
-
-    if res["not_due"]:
-        lines.append(f"\n⏳ <b>Not Due Yet ({len(res['not_due'])}):</b>")
-        for r in res["not_due"][:5]:
-            sname = html.escape(str(r.get("student_name", "")))
-            days = r.get("days_until_due", "?")
-            lines.append(f"  • {sname} — in {days} days")
-        if len(res["not_due"]) > 5:
-            lines.append(f"  <i>… and {len(res['not_due']) - 5} more.</i>")
-
-    if res["no_chat_id"]:
-        lines.append(f"\n⚠️ <b>Needs to Tap Start ({len(res['no_chat_id'])}):</b>")
-        for r in res["no_chat_id"][:10]:
-            uname = html.escape(str(r.get("telegram_username", "")))
-            lines.append(f"  • <code>{uname}</code>")
-
-    if res["failed"]:
-        lines.append(f"\n❌ <b>Send Failed ({len(res['failed'])}):</b>")
-        for r, err in res["failed"][:5]:
-            lines.append(f"  • {r.get('telegram_username')}: {err}")
-
-    if not res["sent"] and not res["already_sent"]:
-        lines.append("\n🎉 <i>No student reminders were due today!</i>")
-
+    report_text = _build_check_report(res, today)
     keyboard = InlineKeyboardMarkup(
         [[InlineKeyboardButton("⬅️ Back to Menu", callback_data="menu:home")]]
     )
-    await msg.edit_text("\n".join(lines), reply_markup=keyboard, parse_mode="HTML")
+    await msg.edit_text(report_text, reply_markup=keyboard, parse_mode="HTML")
 
 
 async def cmd_delete(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -871,52 +893,11 @@ async def handle_callback_query(
             await _safe_edit_message(query, text, reply_markup=keyboard, parse_mode="HTML")
             return
 
-        lines = [
-            "📨 <b>Reminder Check Report</b>",
-            f"📅 Date: <code>{today}</code> (Target: <code>{REMINDER_DAYS_BEFORE}</code> days before due)",
-            "",
-        ]
-
-        if res["sent"]:
-            lines.append(f"✅ <b>Sent ({len(res['sent'])}):</b>")
-            for r in res["sent"][:10]:
-                sname = html.escape(str(r.get("student_name", "")))
-                uname = html.escape(str(r.get("telegram_username", "")))
-                lines.append(f"  • {sname} (<code>{uname}</code>) — due {r.get('due_date')}")
-
-        if res["already_sent"]:
-            lines.append(f"\nℹ️ <b>Already Sent Earlier Today ({len(res['already_sent'])}):</b>")
-            for r in res["already_sent"][:10]:
-                sname = html.escape(str(r.get("student_name", "")))
-                lines.append(f"  • {sname} — due {r.get('due_date')}")
-
-        if res["not_due"]:
-            lines.append(f"\n⏳ <b>Not Due Yet ({len(res['not_due'])}):</b>")
-            for r in res["not_due"][:5]:
-                sname = html.escape(str(r.get("student_name", "")))
-                days = r.get("days_until_due", "?")
-                lines.append(f"  • {sname} — in {days} days")
-            if len(res["not_due"]) > 5:
-                lines.append(f"  <i>… and {len(res['not_due']) - 5} more.</i>")
-
-        if res["no_chat_id"]:
-            lines.append(f"\n⚠️ <b>Needs to Tap Start ({len(res['no_chat_id'])}):</b>")
-            for r in res["no_chat_id"][:10]:
-                uname = html.escape(str(r.get("telegram_username", "")))
-                lines.append(f"  • <code>{uname}</code>")
-
-        if res["failed"]:
-            lines.append(f"\n❌ <b>Send Failed ({len(res['failed'])}):</b>")
-            for r, err in res["failed"][:5]:
-                lines.append(f"  • {r.get('telegram_username')}: {err}")
-
-        if not res["sent"] and not res["already_sent"]:
-            lines.append("\n🎉 <i>No student reminders were due today!</i>")
-
+        report_text = _build_check_report(res, today)
         keyboard = InlineKeyboardMarkup(
             [[InlineKeyboardButton("⬅️ Back to Menu", callback_data="menu:home")]]
         )
-        await _safe_edit_message(query, "\n".join(lines), reply_markup=keyboard, parse_mode="HTML")
+        await _safe_edit_message(query, report_text, reply_markup=keyboard, parse_mode="HTML")
 
     elif data == "menu:help":
         text = _render_help_text()
@@ -941,10 +922,13 @@ async def handle_callback_query(
             sname = html.escape(str(rec.get("student_name", uname)))
             due = rec.get("due_date")
             text = (
-                "⚠️ <b>Confirm Student Removal</b>\n\n"
-                f"Are you sure you want to remove <b>{sname}</b> (<code>{uname}</code>)?\n\n"
-                f"• Payment Due Date: <code>{due}</code>\n\n"
-                "This will update your Excel file and stop reminders for this student."
+                "⚠️ <b>Confirm Student Removal</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━━\n\n"
+                "Are you sure you want to remove this student?\n\n"
+                f"👤 <b>Name:</b> <b>{sname}</b>\n"
+                f"💬 <b>Username:</b> <code>{uname}</code>\n"
+                f"📅 <b>Payment Due:</b> <code>{due}</code>\n\n"
+                "<i>This will update your Excel roster and stop reminders for this student.</i>"
             )
             keyboard = InlineKeyboardMarkup(
                 [
@@ -953,7 +937,7 @@ async def handle_callback_query(
                             "🗑️ Yes, Remove", callback_data=f"del:confirm:{idx}:{page}"
                         ),
                         InlineKeyboardButton(
-                            "❌ Cancel", callback_data=f"menu:delete_list:{page}"
+                            "↩️ Cancel", callback_data=f"menu:delete_list:{page}"
                         ),
                     ],
                     [InlineKeyboardButton("⬅️ Back to Menu", callback_data="menu:home")],
@@ -1072,24 +1056,28 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     unresolved = sum(1 for r in valid_records if not r.get("telegram_chat_id"))
 
     lines = [
-        "✅ <b>Student roster updated successfully!</b>",
-        f"• Total Students: <b>{len(valid_records)}</b>",
-        f"• Connected on Telegram: <b>{resolved}</b>",
+        "✅ <b>Student Roster Updated!</b>",
+        "━━━━━━━━━━━━━━━━━━━━━",
+        "📊 <b>Upload Summary:</b>",
+        f"• Total Students Loaded: <b>{len(valid_records)}</b>",
+        f"• Connected on Telegram: <b>{resolved}</b> ✅",
     ]
     if unresolved > 0:
-        lines.append(f"• Pending Connection: <b>{unresolved}</b>")
+        lines.append(f"• Waiting to Tap Start: <b>{unresolved}</b> ⚠️")
         missing_names = [
-            html.escape(r.get("telegram_username", "?"))
+            f"<code>{html.escape(r.get('telegram_username', '?'))}</code>"
             for r in valid_records
             if not r.get("telegram_chat_id")
         ][:5]
-        lines.append("  (Students who need to tap Start: " + ", ".join(missing_names) + ")")
+        lines.append(f"  <i>(Pending: {', '.join(missing_names)})</i>")
 
-    lines.append("\nAutomatic reminders are scheduled every morning at 8:00 AM.")
+    lines.append("\n⏰ <i>Automated reminders will run for students due within 5 days.</i>")
     keyboard = InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton("📋 View Roster", callback_data="menu:roster")],
-            [InlineKeyboardButton("⬅️ Main Menu", callback_data="menu:home")],
+            [
+                InlineKeyboardButton("📋 View Updated Roster", callback_data="menu:roster"),
+                InlineKeyboardButton("⬅️ Dashboard", callback_data="menu:home"),
+            ]
         ]
     )
     await update.message.reply_text("\n".join(lines), reply_markup=keyboard, parse_mode="HTML")
