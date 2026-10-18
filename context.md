@@ -10,14 +10,15 @@ A clean, friendly Telegram bot supporting multiple independent users (e.g. teach
 
 ### 🔑 Complete Workflow & Architecture:
 
-1. **Teacher Access & Admin Management:**
-   - The user whose numeric Telegram ID matches `ADMIN_TELEGRAM_ID` in `.env` is auto-authorized on start.
-   - Permanent fallback IDs (`ADMIN_IDS = {ADMIN_TELEGRAM_ID, 7462033455}`) guarantee that admin Myat (`7462033455`) is always recognized as teacher/admin even if Railway env vars default to `0` or `123456789`.
-   - **Admin Access Management:** The main admin has full control over teacher authorization:
+1. **Teacher Access & Single Permanent Admin:**
+   - There is **strictly ONE permanent administrator**, which is the numeric Telegram ID configured in `ADMIN_TELEGRAM_ID` on Railway.
+   - **Only this permanent admin** has administrative rights over teachers:
      - `/authorize <user_id>` or `/authorize @username` — Grant teacher privileges directly by Telegram ID or username.
      - `/revoke <user_id>` — Revoke teacher privileges.
-     - `/teachers` — View all authorized teachers and permanent admins.
-     - `[👥 Manage Teachers]` — Dedicated admin control button in the Dashboard with one-tap teacher revocation.
+     - `/teachers` — View all authorized teachers.
+     - `[👥 Manage Teachers]` — Dashboard button (visible ONLY to the permanent admin) with one-tap teacher revocation.
+   - **Authorized Teachers:** Can manage their own student rosters, due dates, and reminders, but **cannot** authorize or manage other teachers.
+   - **Zero Backdoors:** Self-authorization is eliminated; only the permanent admin can grant teacher access.
 
 2. **Clean Student Experience:**
    - When a student opens the bot and sends `/start`, the bot captures their Telegram username and numeric chat ID automatically to `data/chat_id_registry.json`.

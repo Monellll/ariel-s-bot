@@ -49,11 +49,9 @@ try:
 except ValueError:
     ADMIN_TELEGRAM_ID = 7462033455
 
-if ADMIN_TELEGRAM_ID in (0, 123456789):
-    ADMIN_TELEGRAM_ID = 7462033455
-
-# Set of Telegram IDs with permanent admin privileges (Ariel / Myat)
-ADMIN_IDS: set[int] = {ADMIN_TELEGRAM_ID, 7462033455}
+# The single permanent administrator defined strictly by Railway / .env
+ADMIN_ID: int = ADMIN_TELEGRAM_ID
+ADMIN_IDS: set[int] = {ADMIN_ID}
 
 TIMEZONE: str = os.getenv("TIMEZONE", "Asia/Yangon")
 REMINDER_DAYS_BEFORE: int = int(os.getenv("REMINDER_DAYS_BEFORE", "5"))
@@ -140,8 +138,8 @@ PAGE_SIZE = 6
 
 
 def _load_authorized_users() -> set[int]:
-    """Load authorized user IDs from JSON. Admin is always included."""
-    users = set(ADMIN_IDS)
+    """Load authorized user IDs from JSON. Main admin is always included."""
+    users = {ADMIN_ID}
     if AUTHORIZED_USERS_PATH.exists():
         try:
             with open(AUTHORIZED_USERS_PATH, "r", encoding="utf-8") as f:
@@ -150,7 +148,7 @@ def _load_authorized_users() -> set[int]:
                 users.update(int(uid) for uid in data)
         except (json.JSONDecodeError, OSError, ValueError) as exc:
             logger.warning("Could not load authorized_users.json: %s", exc)
-    users.update(ADMIN_IDS)
+    users.add(ADMIN_ID)
     return users
 
 
@@ -222,15 +220,15 @@ def _resolve_chat_ids(records: list[dict]) -> int:
 
 
 def _is_admin(update: Update) -> bool:
-    """Check if the user is the bot administrator."""
-    return update.effective_user is not None and update.effective_user.id in ADMIN_IDS
+    """Check if the user is the single permanent administrator configured in Railway."""
+    return update.effective_user is not None and update.effective_user.id == ADMIN_ID
 
 
 def _is_authorized(update: Update) -> bool:
-    """Check if the user is an authorized teacher or admin."""
+    """Check if the user is an authorized teacher or the main administrator."""
     if update.effective_user is None:
         return False
-    return update.effective_user.id in ADMIN_IDS or update.effective_user.id in _authorized_users
+    return update.effective_user.id == ADMIN_ID or update.effective_user.id in _authorized_users
 
 
 # ---------------------------------------------------------------------------
@@ -263,18 +261,17 @@ def _build_main_menu_keyboard(is_admin: bool = False) -> InlineKeyboardMarkup:
 def _render_teachers_list() -> tuple[str, InlineKeyboardMarkup]:
     """Render the list of teachers and access control buttons for administrators."""
     id_to_uname = {cid: uname for uname, cid in _chat_id_registry.items()}
+    admin_uname = id_to_uname.get(ADMIN_ID, "Admin")
 
     lines = [
         "👥 <b>Teacher & Administrator Access</b>",
         "━━━━━━━━━━━━━━━━━━━━━",
-        "👑 <b>Permanent Administrators:</b>",
+        f"👑 <b>Permanent Administrator:</b>\n  • <code>{ADMIN_ID}</code> ({admin_uname})",
+        "",
+        "🎓 <b>Authorized Teachers:</b>",
     ]
-    for aid in sorted(ADMIN_IDS):
-        uname = id_to_uname.get(aid, "Admin")
-        lines.append(f"  • <code>{aid}</code> ({uname})")
 
-    other_teachers = sorted([uid for uid in _authorized_users if uid not in ADMIN_IDS])
-    lines.append("\n🎓 <b>Authorized Teachers:</b>")
+    other_teachers = sorted([uid for uid in _authorized_users if uid != ADMIN_ID])
     if other_teachers:
         for uid in other_teachers:
             uname = id_to_uname.get(uid, "Teacher")
@@ -768,8 +765,8 @@ async def cmd_revoke(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             await update.message.reply_text("❌ Please provide a valid numeric Telegram ID.")
             return
 
-    if target_id in ADMIN_IDS:
-        await update.message.reply_text("❌ Cannot revoke a permanent administrator.")
+    if target_id == ADMIN_ID:
+        await update.message.reply_text("❌ Cannot revoke the permanent administrator.")
         return
 
     if target_id in _authorized_users:
@@ -791,25 +788,14 @@ async def cmd_teachers(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 
 async def cmd_auth(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """/auth — If admin, authorize a target; if non-admin, self-authorize using admin ID."""
-    if _is_admin(update) and context.args:
-        await cmd_authorize(update, context)
-        return
-
-    user_id = update.effective_user.id
-    args = context.args or []
-    if not args:
-        await update.message.reply_text("Usage: <code>/auth &lt;Admin_Chat_ID&gt;</code>", parse_mode="HTML")
-        return
-
-    entered_id = args[0].strip()
-    if entered_id in [str(x) for x in ADMIN_IDS]:
-        _authorized_users.add(user_id)
-        _save_authorized_users()
-        await update.message.reply_text("✅ <b>Authorized!</b> You now have full teacher access.", parse_mode="HTML")
-        await cmd_start(update, context)
+    """/auth — Admin helper command (redirects to /authorize)."""
+    if _is_admin(update):
+        if context.args:
+            await cmd_authorize(update, context)
+        else:
+            await update.message.reply_text("👑 <b>Admin Usage:</b> <code>/authorize &lt;Telegram_ID&gt;</code> to grant teacher access.", parse_mode="HTML")
     else:
-        await update.message.reply_text("❌ Incorrect Admin Chat ID. Access denied.")
+        await update.message.reply_text("🔒 Only the permanent administrator can grant teacher access.", parse_mode="HTML")
 
 
 # ---------------------------------------------------------------------------
@@ -1110,15 +1096,22 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle text input (e.g. entering admin ID for teacher auth)."""
-    user_id = update.effective_user.id
-    text = (update.message.text or "").strip()
+    """Handle plain text messages."""
+    user = update.effective_user
+    chat_id = update.effective_chat.id
+    if user:
+        _register_chat_id(user.username, chat_id)
 
-    if text in [str(x) for x in ADMIN_IDS]:
-        _authorized_users.add(user_id)
-        _save_authorized_users()
-        await update.message.reply_text("✅ <b>Authorized!</b> Welcome to Ariel's Bot.", parse_mode="HTML")
-        await cmd_start(update, context)
+    if _is_authorized(update):
+        await update.message.reply_text(
+            "💡 <i>Tip: Send an Excel file (<code>.xlsx</code>) anytime to update your student roster, or type /menu to open your dashboard.</i>",
+            parse_mode="HTML",
+        )
+    else:
+        await update.message.reply_text(
+            "👋 Hello! Your account is registered with Ariel's English Class. You will receive gentle reminders here whenever tuition is due. ✨",
+            parse_mode="HTML",
+        )
 
 
 # ---------------------------------------------------------------------------
