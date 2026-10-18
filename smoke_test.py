@@ -564,12 +564,12 @@ check("Admin 7462033455 recognized by _is_admin", bot._is_admin(mock_update))
 check("Admin 7462033455 recognized by _is_authorized", bot._is_authorized(mock_update))
 
 async def run_callback_tests():
-    # Test safe edit markdown fallback on BadRequest
+    # Test safe edit markdown fallback on BadRequest using edit_message_text
     mock_query = AsyncMock()
     from telegram.error import BadRequest
-    mock_query.edit_text.side_effect = [BadRequest("Can't parse entities"), None]
+    mock_query.edit_message_text.side_effect = [BadRequest("Can't parse entities"), None]
     await bot._safe_edit_message(mock_query, "Bad *markdown [test", None, "Markdown")
-    check("Markdown parse error cleanly falls back to plain text", mock_query.edit_text.call_count == 2)
+    check("Markdown parse error cleanly falls back to plain text", mock_query.edit_message_text.call_count == 2)
 
     # Test handle_callback_query with menu:home
     cb_update = MagicMock()
@@ -581,13 +581,13 @@ async def run_callback_tests():
     ctx = MagicMock()
 
     await bot.handle_callback_query(cb_update, ctx)
-    check("Callback menu:home handled successfully", cb_query.edit_text.called)
+    check("Callback menu:home handled successfully", cb_query.edit_message_text.called or cb_query.edit_text.called)
 
     # Test unknown/legacy callback graceful handling
     cb_query.reset_mock()
     cb_query.data = "menu:language"
     await bot.handle_callback_query(cb_update, ctx)
-    check("Legacy callback gracefully routes back to menu", cb_query.edit_text.called)
+    check("Legacy callback gracefully routes back to menu", cb_query.edit_message_text.called or cb_query.edit_text.called)
 
 asyncio.run(run_callback_tests())
 

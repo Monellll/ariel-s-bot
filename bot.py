@@ -23,7 +23,7 @@ from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from dotenv import load_dotenv
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.error import BadRequest, TelegramError
 from telegram.ext import (
     Application,
@@ -439,15 +439,23 @@ async def _safe_edit_message(
     parse_mode: str | None = "HTML",
 ) -> None:
     """Safely edit query message. Falls back to plain text if HTML parsing ever fails."""
+    async def _do_edit(pm):
+        if hasattr(query, "edit_message_text"):
+            return await query.edit_message_text(text, reply_markup=reply_markup, parse_mode=pm)
+        elif hasattr(query, "edit_text"):
+            return await query.edit_text(text, reply_markup=reply_markup, parse_mode=pm)
+        elif hasattr(query, "message") and hasattr(query.message, "edit_text"):
+            return await query.message.edit_text(text, reply_markup=reply_markup, parse_mode=pm)
+
     try:
-        await query.edit_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
+        await _do_edit(parse_mode)
     except BadRequest as exc:
         err = str(exc)
         if "Message is not modified" in err:
             return
-        logger.warning("HTML parse error in edit_text (%s). Trying plain text fallback...", err)
+        logger.warning("Parse error in edit_message_text (%s). Trying plain text fallback...", err)
         try:
-            await query.edit_text(text, reply_markup=reply_markup, parse_mode=None)
+            await _do_edit(None)
         except BadRequest as inner_exc:
             if "Message is not modified" not in str(inner_exc):
                 logger.error("Failed to edit message in fallback: %s", inner_exc)
@@ -509,7 +517,17 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def cmd_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """/menu — Open main dashboard."""
-    await cmd_start(update, context)
+    if _is_authorized(update):
+        await cmd_start(update, context)
+    else:
+        await update.message.reply_text(
+            "🔒 <b>Teacher Access Required</b>\n\n"
+            "The Menu & Control Panel is reserved for class administrators.\n\n"
+            "To authorize this chat as a teacher, type:\n"
+            "<code>/auth &lt;Admin_ID&gt;</code>\n"
+            "or simply reply with your Admin ID.",
+            parse_mode="HTML",
+        )
 
 
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -963,6 +981,22 @@ async def on_startup(application: Application) -> None:
 
     _authorized_users = _load_authorized_users()
     _chat_id_registry = _load_chat_id_registry()
+
+    # Register commands for the Telegram Menu button (bottom-left [Menu] button in chat)
+    try:
+        await application.bot.set_my_commands(
+            [
+                BotCommand("menu", "📋 Open Teacher Control Panel"),
+                BotCommand("roster", "👥 View Student Roster & Due Dates"),
+                BotCommand("check", "📨 Check & Send Reminders Now"),
+                BotCommand("delete", "🗑️ Remove Student from Roster"),
+                BotCommand("help", "📖 How to Use Ariel's Bot"),
+                BotCommand("start", "🔄 Welcome / Restart Bot"),
+            ]
+        )
+        logger.info("Bot commands successfully registered with Telegram.")
+    except Exception as exc:
+        logger.warning("Could not register bot commands: %s", exc)
 
     for user_id in _authorized_users:
         excel_path = _user_excel_path(user_id)
