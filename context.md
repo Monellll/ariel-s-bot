@@ -66,7 +66,7 @@ A clean, friendly Telegram bot supporting multiple independent users (e.g. teach
    - **Telegram Native Menu Button**: Commands registered with Telegram API (`set_my_commands`) so the bottom-left `[ ☰ Menu ]` button always works.
    - **`run_polling(drop_pending_updates=True)`**: Cleans out old stuck backlogs on startup.
    - **Single-Worker Cloud Deployment**: Uses `railway.toml` with `startCommand = "python bot.py"` (redundant `Procfile` removed) to eliminate duplicate instance conflicts (HTTP 409).
-   - **Automated Tests:** 15 test suites and 60 assertions in `smoke_test.py` covering excel parsing, dates, deduplication, multi-user isolation, admin rights, and callbacks.
+    - **Automated Tests:** 21 test suites and 99 assertions in `smoke_test.py` covering excel parsing, multi-sheet aggregation, dates, deduplication, 3-day repeat interval, multi-user isolation, admin rights, and callbacks.
 
 ---
 
@@ -82,7 +82,7 @@ Ariel's Bot/
     ├── bot.py                             # Entry point: Multi-user Telegram handlers + Friendly UI + APScheduler
     ├── excel_handler.py                   # Excel parsing, validation & saving (pure Python, openpyxl)
     ├── reminder_scheduler.py              # Daily check logic, dynamic bilingual formatting, JSON persistence + lock
-    ├── smoke_test.py                      # Offline unit/smoke tests (15 test suites, 60 assertions)
+    ├── smoke_test.py                      # Offline unit/smoke tests (21 test suites, 99 assertions)
     ├── create_test_xlsx.py                # Helper script to generate sample test Excel
     ├── TESTING_GUIDE.md                   # Live self-testing guide
     ├── context.md                         # Synchronized project context
@@ -99,6 +99,7 @@ Ariel's Bot/
     │   │   ├── students.xlsx              # That user's student roster
     │   │   └── sent_reminders.json        # That user's sent reminder history
     │   └── test_students.xlsx             # Sample test data
+    │   └── sheet_url.txt                  # Linked Google Sheet URL for auto-sync
     ├── logs/
     │   └── bot.log                        # Rotating log file (git-ignored)
     └── venv/                              # Python virtual environment (git-ignored)
@@ -126,4 +127,4 @@ Ariel's Bot/
 
 ---
 
-*Last updated: 2026-10-18*
+*Last updated: 2026-10-19*
