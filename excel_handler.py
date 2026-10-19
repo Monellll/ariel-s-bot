@@ -56,61 +56,81 @@ def load_excel(file_path: str) -> tuple[list[StudentRecord], int, list[str]]:
     except Exception as exc:
         raise ValueError(f"Cannot open Excel file: {exc}") from exc
 
-    ws = wb.active
-    rows = list(ws.iter_rows(values_only=True))
-    wb.close()
+    sheet_names = wb.sheetnames
+    if not sheet_names:
+        wb.close()
+        raise ValueError("Excel file contains no sheets.")
 
-    if not rows:
-        raise ValueError("Excel file is empty.")
-
-    # -----------------------------------------------------------------------
-    # Parse header row
-    # -----------------------------------------------------------------------
-    raw_headers = rows[0]
-    col_index = _map_columns(raw_headers)
-
-    required = {"telegram_username", "due_date"}
-    missing = required - col_index.keys()
-    if missing:
-        raise ValueError(
-            f"Excel file is missing required column(s): {', '.join(sorted(missing))}. "
-            f"Found columns: {list(col_index.keys())}"
-        )
-
-    # -----------------------------------------------------------------------
-    # Parse data rows
-    # -----------------------------------------------------------------------
     valid_records: list[StudentRecord] = []
     error_messages: list[str] = []
     invalid_count = 0
     seen_entries: set[tuple[str, str]] = set()
+    found_any_matching_sheet = False
+    all_missing_columns: dict[str, set[str]] = {}
+    is_multi_sheet = len(sheet_names) > 1
 
-    for row_num, row in enumerate(rows[1:], start=2):
-        # Skip entirely blank rows
-        if all(cell is None or str(cell).strip() == "" for cell in row):
+    for sheet_name in sheet_names:
+        ws = wb[sheet_name]
+        rows = list(ws.iter_rows(values_only=True))
+        if not rows:
             continue
 
-        errors, record = _parse_row(row_num, row, col_index)
-
-        if errors:
-            invalid_count += 1
-            error_messages.extend(errors)
-            logger.warning("Row %d skipped: %s", row_num, "; ".join(errors))
-        elif record:
-            # Duplicate row safeguard: skip identical student + due date entries in same sheet
-            uname = record.get("telegram_username", "").lower()
-            due_str = str(record.get("due_date"))
-            dedup_tuple = (uname, due_str)
-            if dedup_tuple in seen_entries:
-                logger.warning(
-                    "Row %d skipped: duplicate entry for %s with due_date %s",
-                    row_num,
-                    record.get("telegram_username"),
-                    record.get("due_date"),
-                )
+        raw_headers = rows[0]
+        col_index = _map_columns(raw_headers)
+        required = {"telegram_username", "due_date"}
+        missing = required - col_index.keys()
+        if missing:
+            all_missing_columns[sheet_name] = missing
+            # If multi-sheet workbook, safely skip non-student tabs (notes, cover sheet)
+            if is_multi_sheet:
                 continue
-            seen_entries.add(dedup_tuple)
-            valid_records.append(record)
+            else:
+                wb.close()
+                raise ValueError(
+                    f"Excel file is missing required column(s): {', '.join(sorted(missing))}. "
+                    f"Found columns: {list(col_index.keys())}"
+                )
+
+        found_any_matching_sheet = True
+
+        for row_num, row in enumerate(rows[1:], start=2):
+            # Skip entirely blank rows
+            if all(cell is None or str(cell).strip() == "" for cell in row):
+                continue
+
+            errors, record = _parse_row(row_num, row, col_index)
+
+            if errors:
+                invalid_count += 1
+                prefix = f"[{sheet_name}] " if is_multi_sheet else ""
+                error_messages.extend([f"{prefix}{e}" for e in errors])
+                logger.warning("[%s] Row %d skipped: %s", sheet_name, row_num, "; ".join(errors))
+            elif record:
+                # Duplicate row safeguard: skip identical student + due date entries across all sheets
+                uname = record.get("telegram_username", "").lower()
+                due_str = str(record.get("due_date"))
+                dedup_tuple = (uname, due_str)
+                if dedup_tuple in seen_entries:
+                    logger.warning(
+                        "[%s] Row %d skipped: duplicate entry for %s with due_date %s",
+                        sheet_name,
+                        row_num,
+                        record.get("telegram_username"),
+                        record.get("due_date"),
+                    )
+                    continue
+                seen_entries.add(dedup_tuple)
+                valid_records.append(record)
+
+    wb.close()
+
+    if not found_any_matching_sheet:
+        if is_multi_sheet:
+            raise ValueError(
+                "None of the sheets in the workbook contain the required columns ('telegram_username', 'due_date')."
+            )
+        else:
+            raise ValueError("Excel file is empty.")
 
     logger.info(
         "Excel loaded: %d valid, %d invalid rows", len(valid_records), invalid_count

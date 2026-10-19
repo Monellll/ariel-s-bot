@@ -45,25 +45,20 @@ A clean, friendly Telegram bot supporting multiple independent users (e.g. teach
 
 4. **Google Sheets Link & Excel Upload (Teachers):**
    - **Google Sheet Link (Recommended):** Teachers can send their Google Sheet link anytime; auto-synced live.
-   - **Excel Upload (Fallback):** Supports .xlsx files.
+   - **Multi-Sheet Collection:** The bot scans **all sheets/tabs** in the workbook. Any sheet with `telegram_username` and `due_date` has its students collected into a unified roster. Non-roster tabs (e.g. Notes, Attendance) are safely ignored. Duplicates across sheets are automatically deduplicated.
+   - **Excel Upload (Fallback):** Supports `.xlsx` files with single or multiple sheets.
+   - **Required Columns:** Only **`student_name`**, **`telegram_username`**, and **`due_date`** (format: YYYY-MM-DD). `telegram_chat_id` is **NOT required**!
 
-### Original Excel Upload Details:
-   - Teachers only need to provide **`student_name`**, **`telegram_username`**, and **`due_date`** (format: YYYY-MM-DD).
-   - `telegram_chat_id` is **NOT required** in the Excel file!
-   - On upload:
-     - The file is validated via `excel_handler.py`.
-     - Valid records are saved to `data/{user_id}/students.xlsx` and loaded into `_user_records[user_id]`.
-     - `_resolve_chat_ids()` cross-references `data/chat_id_registry.json` and maps `@username` to `chat_id`.
-     - The bot displays an instant **Upload Summary Card** showing total students, linked count, and names of pending students.
-
-5. **Automated Reminders & Flexible Window:**
+5. **Automated Reminders & 3-Day Repeat Interval:**
    - **Background Scheduler:** Dynamically configured via `CHECK_INTERVAL_MINUTES`:
      - If `CHECK_INTERVAL_MINUTES=0` (or not set): Runs in **Production Mode** once daily at 8:00 AM (`Asia/Yangon`).
      - If `CHECK_INTERVAL_MINUTES > 0`: Runs in **Test Mode** (e.g., checks every 3 minutes).
-   - **Reminder Window:** Reminds students whose fee is due **within the reminder window (0 to `REMINDER_DAYS_BEFORE` days, default 5)** so students due today or within 5 days are never skipped.
+   - **Reminder Window & 3-Day Repeat:**
+     - Initial reminder triggers **5 days before due date** (`REMINDER_DAYS_BEFORE=5`).
+     - If the student's due date is still upcoming following the Day 5 reminder, reminders are sent **again every 3 days** (`REMINDER_REPEAT_INTERVAL_DAYS=3`, e.g. Day 5 and Day 2 before due date).
    - **Bilingual Message:** Sends a polite bilingual reminder message (English + Myanmar).
    - **Teacher Alert on Auto-Send:** When the background job delivers reminders, it automatically notifies the teacher with the student names.
-   - **Zero Duplicate Spam:** Canonical key `{chat_id}:{due_date}` saved atomically to `sent_reminders.json` prevents duplicate messages.
+   - **Zero Duplicate Spam:** Date-tracked keys in `sent_reminders.json` prevent multiple sends on the same day.
 
 6. **Bulletproof Technical Resilience:**
    - **HTML Mode (`parse_mode="HTML"`)**: Prevents Telegram entity parsing errors caused by underscores in usernames (e.g. `@thiri_test`, `@myat_min`) or brackets in messages.

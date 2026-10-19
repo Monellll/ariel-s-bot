@@ -832,6 +832,114 @@ async def run_bot_google_sheet_tests():
     shutil.rmtree(Path("data/unit_test_user"), ignore_errors=True)
 
 asyncio.run(run_bot_google_sheet_tests())
+
+# ===========================================================================
+# Test 20: Multi-sheet workbook collection
+# ===========================================================================
+print("\n--- Test 20: Multi-sheet workbook collection ---")
+
+wb_multi = openpyxl.Workbook()
+ws1 = wb_multi.active
+ws1.title = "Batch 1"
+ws1.append(["student_name", "telegram_username", "due_date"])
+ws1.append(["Alice", "@alice", "2026-10-25"])
+
+ws2 = wb_multi.create_sheet(title="Batch 2")
+ws2.append(["student_name", "telegram_username", "due_date"])
+ws2.append(["Bob", "@bob", "2026-10-26"])
+# Add a duplicate of Alice in Batch 2 with same due date to verify dedup
+ws2.append(["Alice Duplicate", "@alice", "2026-10-25"])
+
+ws3 = wb_multi.create_sheet(title="Notes")
+ws3.append(["Topic", "Details"])
+ws3.append(["Meeting", "Class discussion"])
+
+with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as tmp_m:
+    wb_multi.save(tmp_m.name)
+    multi_records, inv_m, errs_m = excel_handler.load_excel(tmp_m.name)
+
+check("Multi-sheet loads records from Batch 1 and Batch 2", len(multi_records) == 2)
+check("Alice from Batch 1 loaded", any(r["telegram_username"] == "@alice" for r in multi_records))
+check("Bob from Batch 2 loaded", any(r["telegram_username"] == "@bob" for r in multi_records))
+check("Notes tab safely ignored without error", inv_m == 0)
+
+# ===========================================================================
+# Test 21: 3-day reminder repeat interval logic
+# ===========================================================================
+print("\n--- Test 21: 3-day reminder repeat interval logic ---")
+
+async def run_repeat_reminder_tests():
+    mock_repeat_bot = AsyncMock()
+    with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tmp_sent:
+        repeat_json = Path(tmp_sent.name)
+
+    student_rec = [
+        {"student_name": "Ko Ko", "telegram_username": "@koko", "due_date": datetime.date(2026, 10, 25), "telegram_chat_id": 112233}
+    ]
+
+    # Day -5 (Oct 20): First reminder should send
+    with patch("reminder_scheduler.datetime") as mock_dt:
+        mock_dt.date = datetime.date
+        mock_dt.datetime.now.return_value.date.return_value = datetime.date(2026, 10, 20)
+        res_day0 = await reminder_scheduler.daily_check(
+            bot=mock_repeat_bot,
+            records=student_rec,
+            sent_reminders_path=repeat_json,
+            repeat_interval_days=3,
+        )
+    check("Day -5 (Oct 20): Initial reminder sent", len(res_day0["sent"]) == 1)
+
+    # Day -4 (Oct 21): 1 day later -> should NOT send
+    with patch("reminder_scheduler.datetime") as mock_dt:
+        mock_dt.date = datetime.date
+        mock_dt.datetime.now.return_value.date.return_value = datetime.date(2026, 10, 21)
+        res_day1 = await reminder_scheduler.daily_check(
+            bot=mock_repeat_bot,
+            records=student_rec,
+            sent_reminders_path=repeat_json,
+            repeat_interval_days=3,
+        )
+    check("Day -4 (Oct 21): Skipped (only 1 day elapsed)", len(res_day1["sent"]) == 0)
+
+    # Day -3 (Oct 22): 2 days later -> should NOT send
+    with patch("reminder_scheduler.datetime") as mock_dt:
+        mock_dt.date = datetime.date
+        mock_dt.datetime.now.return_value.date.return_value = datetime.date(2026, 10, 22)
+        res_day2 = await reminder_scheduler.daily_check(
+            bot=mock_repeat_bot,
+            records=student_rec,
+            sent_reminders_path=repeat_json,
+            repeat_interval_days=3,
+        )
+    check("Day -3 (Oct 22): Skipped (only 2 days elapsed)", len(res_day2["sent"]) == 0)
+
+    # Day -2 (Oct 23): 3 days later -> SHOULD send again!
+    with patch("reminder_scheduler.datetime") as mock_dt:
+        mock_dt.date = datetime.date
+        mock_dt.datetime.now.return_value.date.return_value = datetime.date(2026, 10, 23)
+        res_day3 = await reminder_scheduler.daily_check(
+            bot=mock_repeat_bot,
+            records=student_rec,
+            sent_reminders_path=repeat_json,
+            repeat_interval_days=3,
+        )
+    check("Day -2 (Oct 23): Reminder sent again after 3 days", len(res_day3["sent"]) == 1)
+
+    # Day -1 (Oct 24): 1 day after second reminder -> should NOT send
+    with patch("reminder_scheduler.datetime") as mock_dt:
+        mock_dt.date = datetime.date
+        mock_dt.datetime.now.return_value.date.return_value = datetime.date(2026, 10, 24)
+        res_day4 = await reminder_scheduler.daily_check(
+            bot=mock_repeat_bot,
+            records=student_rec,
+            sent_reminders_path=repeat_json,
+            repeat_interval_days=3,
+        )
+    check("Day -1 (Oct 24): Skipped (only 1 day after 2nd reminder)", len(res_day4["sent"]) == 0)
+
+    repeat_json.unlink(missing_ok=True)
+
+asyncio.run(run_repeat_reminder_tests())
 print("\n" + "=" * 50)
 passed = sum(results)
 total = len(results)

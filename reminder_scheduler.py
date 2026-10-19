@@ -17,7 +17,7 @@ import json
 import logging
 import os
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional, Union
 from zoneinfo import ZoneInfo
 
 from telegram import Bot
@@ -29,7 +29,22 @@ logger = logging.getLogger(__name__)
 # Concurrency & Deduplication Guards
 # ---------------------------------------------------------------------------
 _daily_check_lock = asyncio.Lock()
-_memory_sent_cache: dict[str, set[str]] = {}
+_memory_sent_cache: dict[str, Any] = {}
+
+
+class SentReminders(dict):
+    """
+    Storage mapping reminder_key (chat_id:due_date) -> last_sent_date (YYYY-MM-DD).
+    Maintains full compatibility with both set-like operations (.add, in, len)
+    and dict-like operations (.get, __setitem__).
+    """
+
+    def add(self, key: str, sent_date: Optional[str] = None) -> None:
+        if sent_date:
+            self[key] = sent_date
+        elif key not in self:
+            self[key] = datetime.date.today().isoformat()
+
 
 # ---------------------------------------------------------------------------
 # Constants (overridden by env vars via bot.py)
@@ -66,46 +81,64 @@ REMINDER_TEMPLATE = REMINDER_TEMPLATE_BOTH
 # ---------------------------------------------------------------------------
 
 
-def load_sent_reminders(path: Path = SENT_REMINDERS_PATH) -> set[str]:
+def load_sent_reminders(path: Path = SENT_REMINDERS_PATH) -> SentReminders:
     """
-    Load already-sent reminder keys from JSON.
+    Load already-sent reminder records from JSON.
+    Returns a SentReminders dict mapping reminder_key -> last_sent_date_str.
     Merges with in-memory cache to guarantee zero loss across calls.
-    Returns an empty set if the file doesn't exist and cache is empty.
     """
     key_path = str(path.resolve()) if path.is_absolute() else str(path)
-    cached = _memory_sent_cache.get(key_path, set())
+    cached = _memory_sent_cache.get(key_path)
+
+    result = SentReminders()
+    if cached:
+        result.update(cached)
 
     if not path.exists():
-        return set(cached)
+        _memory_sent_cache[key_path] = result
+        return result
 
     try:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
-        if isinstance(data, list):
-            file_keys = set(data)
-            merged = file_keys | cached
-            _memory_sent_cache[key_path] = merged
-            return set(merged)
-        logger.warning("%s has unexpected format; preserving cache.", path)
-        return set(cached)
+        if isinstance(data, dict):
+            result.update(data)
+        elif isinstance(data, list):
+            # Legacy list format: ["chat_id:due_date", ...]
+            today_iso = datetime.date.today().isoformat()
+            for k in data:
+                if k not in result:
+                    result[k] = today_iso
+        _memory_sent_cache[key_path] = result
+        return result
     except (json.JSONDecodeError, OSError) as exc:
         logger.warning("Could not load %s: %s (preserving cache)", path, exc)
-        return set(cached)
+        return result
 
 
-def save_sent_reminders(keys: set[str], path: Path = SENT_REMINDERS_PATH) -> None:
+def save_sent_reminders(reminders: Any, path: Path = SENT_REMINDERS_PATH) -> None:
     """
-    Save sent reminder keys to JSON atomically using temporary file + os.replace.
-    Guarantees no partial writes or zero-byte corrupted files.
+    Save sent reminder records to JSON atomically using temporary file + os.replace.
+    Accepts SentReminders, dict, set, or list.
     """
     key_path = str(path.resolve()) if path.is_absolute() else str(path)
-    _memory_sent_cache[key_path] = set(keys)
+
+    to_save = {}
+    if isinstance(reminders, dict):
+        to_save = dict(reminders)
+    elif isinstance(reminders, (set, list)):
+        existing = _memory_sent_cache.get(key_path, {})
+        today_iso = datetime.date.today().isoformat()
+        for k in reminders:
+            to_save[k] = existing.get(k, today_iso)
+
+    _memory_sent_cache[key_path] = SentReminders(to_save)
 
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         temp_path = path.with_suffix(f".tmp.{os.getpid()}")
         with open(temp_path, "w", encoding="utf-8") as f:
-            json.dump(sorted(keys), f, indent=2)
+            json.dump(to_save, f, indent=2, sort_keys=True)
             f.flush()
             os.fsync(f.fileno())
         os.replace(temp_path, path)
@@ -213,6 +246,7 @@ async def daily_check(
     sent_reminders_path: Path = SENT_REMINDERS_PATH,
     admin_chat_id: Optional[int] = None,
     default_language: str = "both",
+    repeat_interval_days: int = 3,
 ) -> dict:
     """
     Main daily reminder check.
@@ -298,11 +332,31 @@ async def daily_check(
             )
             reminder_key = f"{chat_id}:{due_date_iso}"
 
-            # Duplicate prevention (both from persistent history and earlier rows in this run)
-            if reminder_key in sent_keys or reminder_key in seen_in_run:
+            # Duplicate prevention in the same run
+            if reminder_key in seen_in_run:
                 already_sent_records.append(rec)
-                logger.info("Already sent/processed reminder for key %s — skipping.", reminder_key)
+                logger.info("Already processed in this run for key %s — skipping.", reminder_key)
                 continue
+
+            # Check if reminder was already sent and whether repeat_interval_days have passed
+            interval = repeat_interval_days if repeat_interval_days > 0 else int(os.getenv("REMINDER_REPEAT_INTERVAL_DAYS", "3"))
+            last_sent_iso = sent_keys.get(reminder_key)
+            if last_sent_iso:
+                try:
+                    last_sent_date = datetime.date.fromisoformat(last_sent_iso)
+                    days_since_last = (today - last_sent_date).days
+                except (ValueError, TypeError):
+                    days_since_last = 999
+
+                if days_since_last < interval:
+                    already_sent_records.append(rec)
+                    logger.info(
+                        "Reminder for %s was sent %d day(s) ago (repeat interval: %d days) — skipping.",
+                        reminder_key,
+                        days_since_last,
+                        interval,
+                    )
+                    continue
 
             seen_in_run.add(reminder_key)
 
@@ -315,12 +369,13 @@ async def daily_check(
             )
             try:
                 await bot.send_message(chat_id=chat_id, text=message)
-                sent_keys.add(reminder_key)
+                today_iso = today.isoformat()
+                sent_keys[reminder_key] = today_iso
                 newly_sent.append(reminder_key)
                 sent_records.append(rec)
                 # Immediately persist atomically to disk so no interruption can ever cause duplication
                 save_sent_reminders(sent_keys, sent_reminders_path)
-                logger.info("Reminder sent & persisted for %s (chat_id=%s, key=%s).", username, chat_id, reminder_key)
+                logger.info("Reminder sent & persisted for %s (chat_id=%s, key=%s, date=%s).", username, chat_id, reminder_key, today_iso)
             except TelegramError as exc:
                 failed.append((rec, str(exc)))
                 logger.error(
