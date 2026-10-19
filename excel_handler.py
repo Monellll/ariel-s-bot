@@ -13,8 +13,11 @@ Returns:
 import datetime
 import logging
 from pathlib import Path
+import re
+import tempfile
 from typing import Optional
 
+import httpx
 import openpyxl
 
 logger = logging.getLogger(__name__)
@@ -374,4 +377,123 @@ def save_excel(records: list[StudentRecord], file_path: str) -> None:
     wb.save(str(path))
     wb.close()
     logger.info("Saved %d records to %s", len(records), path)
+
+
+# ---------------------------------------------------------------------------
+# Google Sheets Integration
+# ---------------------------------------------------------------------------
+
+
+def is_google_sheet_url(url: str) -> bool:
+    """Return True if the provided string contains a Google Sheets URL."""
+    if not url or not isinstance(url, str):
+        return False
+    return "docs.google.com/spreadsheets" in url.lower()
+
+
+def extract_google_sheet_export_url(url: str) -> Optional[str]:
+    """
+    Extract the direct .xlsx export URL from a Google Sheets sharing link.
+    Supports:
+      - Standard links: https://docs.google.com/spreadsheets/d/<ID>/edit...
+      - Published links: https://docs.google.com/spreadsheets/d/e/<ID>/pubhtml...
+      - Specific sheet tabs: ...#gid=12345 or ...&gid=12345
+    """
+    if not is_google_sheet_url(url):
+        return None
+
+    # Check for 'publish to web' URLs: /spreadsheets/d/e/<ID>/...
+    m_pub = re.search(r"/spreadsheets/d/e/([a-zA-Z0-9-_]+)", url)
+    if m_pub:
+        return f"https://docs.google.com/spreadsheets/d/e/{m_pub.group(1)}/pub?output=xlsx"
+
+    # Standard spreadsheet ID: /spreadsheets/(?:u/\d+/)?d/<ID>
+    m_id = re.search(r"/spreadsheets/(?:u/\d+/)?d/([a-zA-Z0-9-_]+)", url)
+    if not m_id:
+        return None
+    sheet_id = m_id.group(1)
+
+    # Optional gid (specific tab)
+    m_gid = re.search(r"[#&?]gid=([0-9]+)", url)
+    gid = m_gid.group(1) if m_gid else None
+
+    export_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=xlsx"
+    if gid:
+        export_url += f"&gid={gid}"
+    return export_url
+
+
+def fetch_google_sheet_bytes(export_url: str, timeout: float = 20.0) -> bytes:
+    """
+    Download the exported Excel file bytes from Google Sheets.
+
+    Raises:
+        PermissionError: If the Google Sheet is restricted / private.
+        ValueError: If the sheet was not found, URL is invalid, or Google returns an error.
+    """
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/120.0.0.0 Safari/537.36"
+        )
+    }
+    with httpx.Client(follow_redirects=True, headers=headers, timeout=timeout) as client:
+        try:
+            resp = client.get(export_url)
+        except httpx.RequestError as exc:
+            raise ValueError(f"Network error connecting to Google Sheets: {exc}") from exc
+
+    if resp.status_code == 404:
+        raise ValueError("Google Sheet not found. Please verify your link is correct.")
+    if resp.status_code != 200:
+        raise ValueError(f"Google Sheets returned HTTP status {resp.status_code}.")
+
+    final_url = str(resp.url)
+    # When a sheet is restricted, Google redirects to Google Accounts login
+    # or serves an HTML sign-in page instead of an Excel ZIP stream (magic header PK\x03\x04).
+    if "accounts.google.com" in final_url or not resp.content.startswith(b"PK\x03\x04"):
+        raise PermissionError(
+            "Access restricted. Please set your Google Sheet sharing to 'Anyone with the link can view'."
+        )
+
+    return resp.content
+
+
+def sync_google_sheet(
+    sheet_url: str, dest_path: str, timeout: float = 20.0
+) -> tuple[list[StudentRecord], int, list[str]]:
+    """
+    Download a Google Sheet as an .xlsx file, validate it, and atomically save to dest_path.
+
+    Returns:
+        (valid_records, invalid_count, error_messages)
+    """
+    export_url = extract_google_sheet_export_url(sheet_url)
+    if not export_url:
+        raise ValueError("Invalid Google Sheets link. Please provide a valid docs.google.com/spreadsheets URL.")
+
+    content = fetch_google_sheet_bytes(export_url, timeout=timeout)
+
+    dest = Path(dest_path)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+
+    # Write to a temporary file first for atomic validation
+    with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as tmp_file:
+        tmp_path = Path(tmp_file.name)
+        tmp_file.write(content)
+
+    try:
+        valid_records, invalid_count, errors = load_excel(str(tmp_path))
+        if len(valid_records) == 0:
+            raise ValueError("The Google Sheet contains no valid student records.")
+
+        # Atomically replace destination file with validated content
+        tmp_path.replace(dest)
+        logger.info("Successfully synced Google Sheet to %s with %d records.", dest, len(valid_records))
+        return valid_records, invalid_count, errors
+    finally:
+        if tmp_path.exists():
+            tmp_path.unlink(missing_ok=True)
+
 

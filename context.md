@@ -43,7 +43,11 @@ A clean, friendly Telegram bot supporting multiple independent users (e.g. teach
        - `[👥 Manage Teachers]` — Admin-only teacher management panel.
        - `[🔄 Refresh Dashboard]` — Refreshes the dashboard stats.
 
-4. **Excel Upload (Teachers):**
+4. **Google Sheets Link & Excel Upload (Teachers):**
+   - **Google Sheet Link (Recommended):** Teachers can send their Google Sheet link anytime; auto-synced live.
+   - **Excel Upload (Fallback):** Supports .xlsx files.
+
+### Original Excel Upload Details:
    - Teachers only need to provide **`student_name`**, **`telegram_username`**, and **`due_date`** (format: YYYY-MM-DD).
    - `telegram_chat_id` is **NOT required** in the Excel file!
    - On upload:

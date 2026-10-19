@@ -12,6 +12,7 @@ import datetime
 import io
 import json
 import os
+import shutil
 import sys
 import tempfile
 from pathlib import Path
@@ -718,8 +719,119 @@ async def run_admin_id_auth_tests():
 asyncio.run(run_admin_id_auth_tests())
 
 # ===========================================================================
-# Summary
+# Test 17: Google Sheets URL extraction & validation
 # ===========================================================================
+print("\n--- Test 17: Google Sheets URL extraction & validation ---")
+
+check("is_google_sheet_url true for edit link", excel_handler.is_google_sheet_url("https://docs.google.com/spreadsheets/d/1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms/edit?usp=sharing"))
+check("is_google_sheet_url true for published link", excel_handler.is_google_sheet_url("https://docs.google.com/spreadsheets/d/e/2PACX-1vT123/pubhtml"))
+check("is_google_sheet_url false for standard web URL", not excel_handler.is_google_sheet_url("https://google.com"))
+check("is_google_sheet_url false for empty string", not excel_handler.is_google_sheet_url(""))
+
+regular_url = "https://docs.google.com/spreadsheets/d/1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms/edit?usp=sharing"
+export_reg = excel_handler.extract_google_sheet_export_url(regular_url)
+check("Standard export URL contains /export?format=xlsx", export_reg == "https://docs.google.com/spreadsheets/d/1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms/export?format=xlsx")
+
+gid_url = "https://docs.google.com/spreadsheets/d/1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms/edit#gid=9988"
+export_gid = excel_handler.extract_google_sheet_export_url(gid_url)
+check("Export URL preserves gid", export_gid == "https://docs.google.com/spreadsheets/d/1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms/export?format=xlsx&gid=9988")
+
+pub_url = "https://docs.google.com/spreadsheets/d/e/2PACX-1vT123/pubhtml"
+export_pub = excel_handler.extract_google_sheet_export_url(pub_url)
+check("Published export URL maps to /pub?output=xlsx", export_pub == "https://docs.google.com/spreadsheets/d/e/2PACX-1vT123/pub?output=xlsx")
+
+# ===========================================================================
+# Test 18: Google Sheets sync & error handling (mocked network)
+# ===========================================================================
+print("\n--- Test 18: Google Sheets sync & error handling ---")
+
+import httpx
+from unittest.mock import patch, MagicMock
+
+# 18.1: Restricted sheet raises PermissionError
+mock_restricted = MagicMock(status_code=200, url="https://accounts.google.com/ServiceLogin", content=b"<!DOCTYPE html><html>Sign in</html>")
+with patch.object(httpx.Client, "get", return_value=mock_restricted):
+    try:
+        excel_handler.sync_google_sheet("https://docs.google.com/spreadsheets/d/test12345/edit", "data/test_sync.xlsx")
+        check("Restricted sheet raises PermissionError", False)
+    except PermissionError:
+        check("Restricted sheet raises PermissionError", True)
+
+# 18.2: 404 sheet raises ValueError
+mock_404 = MagicMock(status_code=404, url="https://docs.google.com/spreadsheets/d/notfound/export?format=xlsx")
+with patch.object(httpx.Client, "get", return_value=mock_404):
+    try:
+        excel_handler.sync_google_sheet("https://docs.google.com/spreadsheets/d/notfound/edit", "data/test_sync.xlsx")
+        check("404 sheet raises ValueError", False)
+    except ValueError as e:
+        check("404 sheet raises ValueError", "not found" in str(e).lower())
+
+# 18.3: Valid sheet downloads, validates, and saves records
+test_records = [
+    {"telegram_username": "@StudentA", "student_name": "Student A", "due_date": datetime.date(2026, 10, 25)},
+    {"telegram_username": "@StudentB", "student_name": "Student B", "due_date": datetime.date(2026, 10, 26)},
+]
+with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as tmp_x:
+    excel_handler.save_excel(test_records, tmp_x.name)
+    with open(tmp_x.name, "rb") as f:
+        valid_excel_bytes = f.read()
+
+mock_ok = MagicMock(status_code=200, url="https://docs.google.com/export", content=valid_excel_bytes)
+sync_dest = Path("data/unit_test_user/students.xlsx")
+with patch.object(httpx.Client, "get", return_value=mock_ok):
+    recs, inv, errs = excel_handler.sync_google_sheet(
+        "https://docs.google.com/spreadsheets/d/valid_test/edit", str(sync_dest)
+    )
+    check("Valid Google Sheet syncs 2 records", len(recs) == 2)
+    check("Valid Google Sheet destination file exists on disk", sync_dest.exists())
+    check("Reloaded sync record has correct username", recs[0]["telegram_username"] == "@StudentA")
+
+# ===========================================================================
+# Test 19: Bot Google Sheet interaction & callback
+# ===========================================================================
+print("\n--- Test 19: Bot Google Sheet interaction & callback ---")
+
+async def run_bot_google_sheet_tests():
+    test_user_id = 8877665544
+    bot._authorized_users.add(test_user_id)
+    bot._save_authorized_users()
+
+    update = MagicMock()
+    user = MagicMock()
+    user.id = test_user_id
+    user.username = "gsheet_teacher"
+    user.first_name = "Teacher GSheet"
+    update.effective_user = user
+    update.effective_chat.id = test_user_id
+    update.message = AsyncMock()
+    update.message.text = "https://docs.google.com/spreadsheets/d/valid_sheet_123/edit?usp=sharing"
+
+    with patch.object(httpx.Client, "get", return_value=mock_ok):
+        await bot.handle_text(update, MagicMock())
+
+    check("Google Sheet URL is saved for user", bot._user_sheet_urls.get(test_user_id) == update.message.text)
+    check("User records loaded in memory from Google Sheet", len(bot._user_records.get(test_user_id, [])) == 2)
+    check("sheet_url.txt file persisted to disk", bot._user_sheet_url_path(test_user_id).exists())
+
+    # Test callback menu:sync_sheet
+    query_update = MagicMock()
+    query = AsyncMock()
+    query.from_user = user
+    query.data = "menu:sync_sheet"
+    query_update.callback_query = query
+
+    with patch.object(httpx.Client, "get", return_value=mock_ok):
+        await bot.handle_callback_query(query_update, MagicMock())
+
+    check("Callback menu:sync_sheet triggered safe edit", query.edit_message_text.called or query.message.edit_text.called)
+
+    # Clean up test user
+    bot._authorized_users.discard(test_user_id)
+    bot._save_authorized_users()
+    shutil.rmtree(Path(f"data/{test_user_id}"), ignore_errors=True)
+    shutil.rmtree(Path("data/unit_test_user"), ignore_errors=True)
+
+asyncio.run(run_bot_google_sheet_tests())
 print("\n" + "=" * 50)
 passed = sum(results)
 total = len(results)

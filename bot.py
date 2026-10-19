@@ -121,11 +121,17 @@ def _user_sent_reminders_path(user_id: int) -> Path:
     return _user_data_dir(user_id) / "sent_reminders.json"
 
 
+def _user_sheet_url_path(user_id: int) -> Path:
+    """Return the saved Google Sheet URL path for a specific user."""
+    return _user_data_dir(user_id) / "sheet_url.txt"
+
+
 # ---------------------------------------------------------------------------
 # In-memory state
 # ---------------------------------------------------------------------------
 
 _user_records: dict[int, list[dict]] = {}
+_user_sheet_urls: dict[int, str] = {}
 _authorized_users: set[int] = set()
 _pending_auth: set[int] = set()
 _chat_id_registry: dict[str, int] = {}
@@ -257,18 +263,32 @@ def _is_authorized(update: Update) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def _build_main_menu_keyboard(is_admin: bool = False) -> InlineKeyboardMarkup:
+def _build_main_menu_keyboard(is_admin: bool = False, has_sheet: bool = False) -> InlineKeyboardMarkup:
     """Build a clean, user-friendly navigation keyboard."""
     buttons = [
         [
             InlineKeyboardButton("📋 Student Roster", callback_data="menu:roster"),
             InlineKeyboardButton("📨 Send Reminders Now", callback_data="menu:check"),
         ],
-        [
-            InlineKeyboardButton("🗑️ Remove Student", callback_data="menu:delete_list:0"),
-            InlineKeyboardButton("📖 How to Use", callback_data="menu:help"),
-        ],
     ]
+    if has_sheet:
+        buttons.append(
+            [
+                InlineKeyboardButton("🔄 Sync Google Sheet", callback_data="menu:sync_sheet"),
+                InlineKeyboardButton("🗑️ Remove Student", callback_data="menu:delete_list:0"),
+            ]
+        )
+        buttons.append(
+            [InlineKeyboardButton("📖 How to Use", callback_data="menu:help")]
+        )
+    else:
+        buttons.append(
+            [
+                InlineKeyboardButton("🗑️ Remove Student", callback_data="menu:delete_list:0"),
+                InlineKeyboardButton("📖 How to Use", callback_data="menu:help"),
+            ]
+        )
+
     if is_admin:
         buttons.append(
             [InlineKeyboardButton("👥 Manage Teachers", callback_data="menu:teachers")]
@@ -336,14 +356,26 @@ def _get_home_text(user_id: int, user_name: str) -> str:
     if missing > 0:
         lines.append(f"• Waiting to Tap Start: <b>{missing}</b> ⚠️")
 
-    lines += [
-        "",
-        "⏰ <b>Reminder Automation:</b>",
-        "Automated checks run daily for students due within <b>5 days</b>.",
-        "",
-        "💡 <i>Tip: Send or drag & drop any <code>.xlsx</code> file anytime to update your roster.</i>",
-        "Choose an action below:",
-    ]
+    has_sheet = user_id in _user_sheet_urls
+    if has_sheet:
+        lines += [
+            "",
+            "🔗 <b>Google Sheet:</b> Connected &amp; Ready ✅",
+            "⏰ <b>Reminder Automation:</b>",
+            "Automated checks run daily for students due within <b>5 days</b>.",
+            "",
+            "💡 <i>Tip: Tap [Sync Google Sheet] anytime to fetch your latest student edits.</i>",
+            "Choose an action below:",
+        ]
+    else:
+        lines += [
+            "",
+            "⏰ <b>Reminder Automation:</b>",
+            "Automated checks run daily for students due within <b>5 days</b>.",
+            "",
+            "💡 <i>Tip: Send your Google Sheet link (or upload an <code>.xlsx</code> file) anytime to update your roster.</i>",
+            "Choose an action below:",
+        ]
     return "\n".join(lines)
 
 
@@ -357,7 +389,7 @@ def _render_roster_text(user_id: int) -> str:
             "━━━━━━━━━━━━━━━━━━━━━\n\n"
             "<i>No student roster loaded yet.</i>\n\n"
             "📤 <b>To get started:</b>\n"
-            "Simply send or attach your Excel file (<code>.xlsx</code>) right here in this chat!"
+            "Simply send your Google Sheet link or attach an Excel file (<code>.xlsx</code>) right here in this chat!"
         )
 
     _resolve_chat_ids(records)
@@ -414,17 +446,19 @@ def _render_help_text() -> str:
     return (
         "📖 <b>How to Use Ariel's Atlas</b>\n"
         "━━━━━━━━━━━━━━━━━━━━━\n\n"
-        "<b>1️⃣ Prepare Your Spreadsheet (.xlsx)</b>\n"
-        "Your Excel file only needs 3 columns:\n"
+        "<b>1️⃣ Prepare Your Google Sheet (or .xlsx)</b>\n"
+        "Your spreadsheet only needs 3 columns in the header row:\n"
         "• <code>student_name</code> — (e.g. <i>Thiri Hlaing</i>)\n"
         "• <code>telegram_username</code> — (e.g. <i>@thiri_test</i>)\n"
         "• <code>due_date</code> — (format: <i>YYYY-MM-DD</i>, e.g. <i>2026-10-25</i>)\n\n"
-        "<b>2️⃣ Upload Anytime</b>\n"
-        "Simply send or drag & drop your <code>.xlsx</code> file directly into this chat anytime! The bot automatically syncs it.\n\n"
+        "<b>2️⃣ Connect via Google Sheet Link</b>\n"
+        "• In Google Sheets, tap <b>Share</b> → change General access to <b>'Anyone with the link'</b> (Viewer).\n"
+        "• Simply paste the link directly into this chat!\n"
+        "<i>(Tip: You can also drag & drop an <code>.xlsx</code> file anytime if you prefer.)</i>\n\n"
         "<b>3️⃣ Student Linking</b>\n"
         "Tell your students to search for <b>@ariel_english_bot</b> and tap <b>Start</b>. The bot automatically links their account!\n\n"
-        "<b>4️⃣ Automated Reminders</b>\n"
-        "The bot automatically checks due dates and sends polite  reminders  5 days before payment is due."
+        "<b>4️⃣ Automated Reminders & Live Sync</b>\n"
+        "The bot automatically checks due dates daily and sends polite reminders 5 days before payment is due. Any edits in your Google Sheet can be refreshed with <b>[Sync Google Sheet]</b>!"
     )
 
 
@@ -438,7 +472,7 @@ def _render_delete_list(
             "🗑️ <b>Remove a Student</b>\n"
             "━━━━━━━━━━━━━━━━━━━━━\n\n"
             "<i>No students currently in your roster.</i>\n\n"
-            "Upload an Excel file to add students."
+            "Send your Google Sheet link or upload an Excel file to add students."
         )
         keyboard = InlineKeyboardMarkup(
             [[InlineKeyboardButton("⬅️ Back to Menu", callback_data="menu:home")]]
@@ -551,7 +585,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if _is_authorized(update):
         # Authorized Teacher / Admin -> Show clean Control Panel
         text = _get_home_text(user_id, name)
-        keyboard = _build_main_menu_keyboard(_is_admin(update))
+        keyboard = _build_main_menu_keyboard(_is_admin(update), has_sheet=(user_id in _user_sheet_urls))
         try:
             await update.message.reply_text(
                 text, reply_markup=keyboard, parse_mode="HTML"
@@ -871,6 +905,174 @@ async def cmd_auth(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text("❌ Incorrect Admin ID. Access denied.")
 
 
+async def _process_and_sync_google_sheet(
+    user_id: int, sheet_url: str
+) -> tuple[bool, str, list[dict]]:
+    """
+    Download and sync roster from a Google Sheet URL.
+    Returns: (success: bool, message: str, records: list[dict])
+    """
+    dest = _user_excel_path(user_id)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+
+    try:
+        valid_records, invalid_count, errors = excel_handler.sync_google_sheet(
+            sheet_url=sheet_url, dest_path=str(dest)
+        )
+    except PermissionError:
+        err_msg = (
+            "🔒 <b>Google Sheet Access Restricted</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━━\n"
+            "The bot could not open your Google Sheet because its sharing setting is currently restricted.\n\n"
+            "<b>How to enable access (30 seconds):</b>\n"
+            "1️⃣ Open your Google Sheet in your browser.\n"
+            "2️⃣ Tap the <b>Share</b> button in the top-right corner.\n"
+            "3️⃣ Under <b>General access</b>, change <i>'Restricted'</i> to <b>'Anyone with the link'</b> (Viewer).\n"
+            "4️⃣ Tap <b>Done</b>, then paste the link here again! ✨\n\n"
+            "<i>(မြန်မာလို)</i>\n"
+            "Google Sheet ထဲမှ <b>Share</b> ကိုနှိပ်ပြီး <b>'Anyone with the link'</b> (Viewer) သို့ ပြောင်းပေးပါရှင့်။"
+        )
+        return False, err_msg, []
+    except (FileNotFoundError, ValueError) as exc:
+        return False, f"❌ <b>Error syncing Google Sheet:</b>\n{html.escape(str(exc))}", []
+    except Exception as exc:
+        logger.exception("Unexpected error syncing Google Sheet: %s", exc)
+        return False, f"❌ <b>Unexpected error syncing Google Sheet:</b>\n{html.escape(str(exc))}", []
+
+    if not valid_records:
+        return (
+            False,
+            "❌ <b>No Valid Records Found</b>\n"
+            "The Google Sheet does not contain any valid student rows.\n"
+            "Please ensure columns <code>telegram_username</code> and <code>due_date</code> exist.",
+            [],
+        )
+
+    # Persist the Sheet URL
+    try:
+        _user_sheet_url_path(user_id).write_text(sheet_url.strip(), encoding="utf-8")
+        _user_sheet_urls[user_id] = sheet_url.strip()
+    except Exception as exc:
+        logger.warning("Could not persist sheet_url for %s: %s", user_id, exc)
+
+    _user_records[user_id] = valid_records
+    resolved = _resolve_chat_ids(valid_records)
+    unresolved = sum(1 for r in valid_records if not r.get("telegram_chat_id"))
+
+    lines = [
+        "✅ <b>Google Sheet Synced!</b>",
+        "━━━━━━━━━━━━━━━━━━━━━",
+        "📊 <b>Upload Summary:</b>",
+        f"• Total Students Loaded: <b>{len(valid_records)}</b>",
+        f"• Connected on Telegram: <b>{resolved}</b> ✅",
+    ]
+    if unresolved > 0:
+        lines.append(f"• Waiting to Tap Start: <b>{unresolved}</b> ⚠️")
+        missing_names = [
+            f"<code>{html.escape(r.get('telegram_username', '?'))}</code>"
+            for r in valid_records
+            if not r.get("telegram_chat_id")
+        ][:5]
+        lines.append(f"  <i>(Pending: {', '.join(missing_names)})</i>")
+
+    lines.append("\n⏰ <i>Automated reminders will run for students due within 5 days.</i>")
+    lines.append("🔄 <i>Google Sheet connected! Tap [Sync Google Sheet] anytime to refresh.</i>")
+    return True, "\n".join(lines), valid_records
+
+
+async def cmd_sheet(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/sheet <url> — Set or view linked Google Sheet."""
+    if not _is_authorized(update):
+        await update.message.reply_text("❌ You are not authorized. Send /start to begin.")
+        return
+
+    user = update.effective_user
+    if not user:
+        return
+    user_id = user.id
+    args = context.args or []
+
+    if not args:
+        if user_id in _user_sheet_urls:
+            current_url = _user_sheet_urls[user_id]
+            keyboard = InlineKeyboardMarkup(
+                [
+                    [InlineKeyboardButton("🔄 Sync Now", callback_data="menu:sync_sheet")],
+                    [InlineKeyboardButton("⬅️ Dashboard", callback_data="menu:home")],
+                ]
+            )
+            await update.message.reply_text(
+                f"🔗 <b>Linked Google Sheet:</b>\n<code>{html.escape(current_url)}</code>\n\n"
+                "• Tap <b>Sync Now</b> to fetch latest changes.\n"
+                "• Or send a new Google Sheet link to update it.",
+                reply_markup=keyboard,
+                parse_mode="HTML",
+            )
+        else:
+            await update.message.reply_text(
+                "🔗 <b>Connect Your Google Sheet:</b>\n\n"
+                "Usage: <code>/sheet &lt;google_sheet_link&gt;</code>\n"
+                "<i>(Or simply paste the link directly into this chat!)</i>\n\n"
+                "<b>Note:</b> Please ensure the sheet's sharing setting is set to <b>'Anyone with the link can view'</b>.",
+                parse_mode="HTML",
+            )
+        return
+
+    sheet_url = args[0].strip()
+    if not excel_handler.is_google_sheet_url(sheet_url):
+        await update.message.reply_text(
+            "❌ Please provide a valid Google Sheets URL (e.g. <code>https://docs.google.com/spreadsheets/d/...</code>).",
+            parse_mode="HTML",
+        )
+        return
+
+    await update.message.reply_text("⏳ Connecting to your Google Sheet and syncing roster…")
+    success, msg, _ = await _process_and_sync_google_sheet(user_id, sheet_url)
+    keyboard = InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("📋 View Updated Roster", callback_data="menu:roster"),
+                InlineKeyboardButton("🔄 Sync Again", callback_data="menu:sync_sheet"),
+            ],
+            [InlineKeyboardButton("⬅️ Dashboard", callback_data="menu:home")],
+        ]
+    )
+    await update.message.reply_text(msg, reply_markup=keyboard, parse_mode="HTML")
+
+
+async def cmd_sync(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/sync — Quick manual sync of the connected Google Sheet."""
+    if not _is_authorized(update):
+        await update.message.reply_text("❌ You are not authorized. Send /start to begin.")
+        return
+
+    user = update.effective_user
+    if not user:
+        return
+    user_id = user.id
+
+    if user_id not in _user_sheet_urls:
+        await update.message.reply_text(
+            "ℹ️ <b>No Google Sheet Connected</b>\n\n"
+            "Simply send your Google Sheet link directly into this chat to connect your roster!",
+            parse_mode="HTML",
+        )
+        return
+
+    await update.message.reply_text("⏳ Fetching latest changes from your Google Sheet…")
+    sheet_url = _user_sheet_urls[user_id]
+    success, msg, _ = await _process_and_sync_google_sheet(user_id, sheet_url)
+    keyboard = InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("📋 View Updated Roster", callback_data="menu:roster"),
+                InlineKeyboardButton("⬅️ Dashboard", callback_data="menu:home"),
+            ]
+        ]
+    )
+    await update.message.reply_text(msg, reply_markup=keyboard, parse_mode="HTML")
+
+
 # ---------------------------------------------------------------------------
 # Callback Query Handler (Interactive Buttons)
 # ---------------------------------------------------------------------------
@@ -901,8 +1103,35 @@ async def handle_callback_query(
     if data == "menu:home":
         first_name = query.from_user.first_name if query.from_user else "there"
         text = _get_home_text(user_id, first_name)
-        keyboard = _build_main_menu_keyboard(is_admin)
+        keyboard = _build_main_menu_keyboard(is_admin, has_sheet=(user_id in _user_sheet_urls))
         await _safe_edit_message(query, text, reply_markup=keyboard, parse_mode="HTML")
+
+    elif data == "menu:sync_sheet":
+        if user_id not in _user_sheet_urls:
+            text = (
+                "ℹ️ <b>No Google Sheet Connected</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━━\n"
+                "You haven't linked a Google Sheet yet.\n\n"
+                "To connect your roster, simply paste your Google Sheet link directly into this chat anytime!"
+            )
+            keyboard = InlineKeyboardMarkup(
+                [[InlineKeyboardButton("⬅️ Back to Menu", callback_data="menu:home")]]
+            )
+            await _safe_edit_message(query, text, reply_markup=keyboard, parse_mode="HTML")
+            return
+
+        sheet_url = _user_sheet_urls[user_id]
+        success, msg, _ = await _process_and_sync_google_sheet(user_id, sheet_url)
+        keyboard = InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton("📋 View Updated Roster", callback_data="menu:roster"),
+                    InlineKeyboardButton("🔄 Sync Again", callback_data="menu:sync_sheet"),
+                ],
+                [InlineKeyboardButton("⬅️ Back to Menu", callback_data="menu:home")],
+            ]
+        )
+        await _safe_edit_message(query, msg, reply_markup=keyboard, parse_mode="HTML")
 
     elif data in ("menu:roster", "menu:status"):
         text = _render_roster_text(user_id)
@@ -1042,7 +1271,7 @@ async def handle_callback_query(
         logger.info("Unrecognized callback '%s', returning to home.", data)
         first_name = query.from_user.first_name if query.from_user else "there"
         text = _get_home_text(user_id, first_name)
-        keyboard = _build_main_menu_keyboard(is_admin)
+        keyboard = _build_main_menu_keyboard(is_admin, has_sheet=(user_id in _user_sheet_urls))
         await _safe_edit_message(query, text, reply_markup=keyboard, parse_mode="HTML")
 
 
@@ -1159,11 +1388,30 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await cmd_start(update, context)
         return
 
-    if _is_authorized(update):
-        await update.message.reply_text(
-            "💡 <i>Tip: Send an Excel file (<code>.xlsx</code>) anytime to update your student roster, or type /menu to open your dashboard.</i>",
-            parse_mode="HTML",
+    # If authorized teacher sends a Google Sheet link, process and sync it directly!
+    if _is_authorized(update) and excel_handler.is_google_sheet_url(raw_text):
+        await update.message.reply_text("⏳ Connecting to your Google Sheet and syncing roster…")
+        success, msg, _ = await _process_and_sync_google_sheet(user.id, raw_text)
+        keyboard = InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton("📋 View Updated Roster", callback_data="menu:roster"),
+                    InlineKeyboardButton("🔄 Sync Again", callback_data="menu:sync_sheet"),
+                ],
+                [InlineKeyboardButton("⬅️ Dashboard", callback_data="menu:home")],
+            ]
         )
+        await update.message.reply_text(msg, reply_markup=keyboard, parse_mode="HTML")
+        return
+
+    if _is_authorized(update):
+        has_sheet = user.id in _user_sheet_urls
+        tip_text = (
+            "💡 <i>Tip: Send your Google Sheet link anytime to connect your roster, or type /menu to open your dashboard.</i>"
+            if not has_sheet
+            else "💡 <i>Tip: Tap [Sync Google Sheet] on your menu to fetch latest updates, send a new link, or type /menu.</i>"
+        )
+        await update.message.reply_text(tip_text, parse_mode="HTML")
     else:
         await update.message.reply_text(
             "👋 Hello! Your account is registered with Ariel's English Class. You will receive gentle reminders here whenever tuition is due. ✨",
@@ -1178,6 +1426,20 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 async def _run_daily_check(bot) -> None:
     """Run automated check for all authorized teachers."""
+    # First, auto-sync any linked Google Sheets so daily reminders use the latest live data
+    for user_id in list(_authorized_users):
+        if user_id in _user_sheet_urls:
+            sheet_url = _user_sheet_urls[user_id]
+            try:
+                dest = _user_excel_path(user_id)
+                recs, _, _ = excel_handler.sync_google_sheet(sheet_url, str(dest))
+                if recs:
+                    _user_records[user_id] = recs
+                    _resolve_chat_ids(recs)
+                    logger.info("Auto-synced %d records from Google Sheet for user %s", len(recs), user_id)
+            except Exception as sync_exc:
+                logger.warning("Could not auto-sync Google Sheet for user %s (using cached roster): %s", user_id, sync_exc)
+
     if not _user_records:
         return
 
@@ -1230,7 +1492,9 @@ async def on_startup(application: Application) -> None:
             [
                 BotCommand("menu", "📋 Open Teacher Control Panel"),
                 BotCommand("roster", "👥 View Student Roster & Due Dates"),
+                BotCommand("sync", "🔄 Sync Roster from Google Sheet"),
                 BotCommand("check", "📨 Check & Send Reminders Now"),
+                BotCommand("sheet", "🔗 Connect Google Sheet"),
                 BotCommand("delete", "🗑️ Remove Student from Roster"),
                 BotCommand("help", "📖 How to Use Ariel's Bot"),
                 BotCommand("teachers", "👥 Manage Teachers (Admin)"),
@@ -1242,6 +1506,16 @@ async def on_startup(application: Application) -> None:
         logger.warning("Could not register bot commands: %s", exc)
 
     for user_id in _authorized_users:
+        # Load saved Google Sheet URL if present
+        sheet_path = _user_sheet_url_path(user_id)
+        if sheet_path.exists():
+            try:
+                url = sheet_path.read_text(encoding="utf-8").strip()
+                if url:
+                    _user_sheet_urls[user_id] = url
+            except Exception as exc:
+                logger.warning("Could not read saved sheet URL for %s: %s", user_id, exc)
+
         excel_path = _user_excel_path(user_id)
         if excel_path.exists():
             try:
@@ -1300,6 +1574,8 @@ def main() -> None:
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("roster", cmd_status))
     app.add_handler(CommandHandler("check", cmd_check))
+    app.add_handler(CommandHandler("sheet", cmd_sheet))
+    app.add_handler(CommandHandler("sync", cmd_sync))
     app.add_handler(CommandHandler("delete", cmd_delete))
     app.add_handler(CommandHandler("auth", cmd_auth))
     app.add_handler(CommandHandler("authorize", cmd_authorize))
