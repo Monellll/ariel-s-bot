@@ -614,7 +614,7 @@ async def run_admin_mgmt_tests():
     # Permanent admin cannot be revoked
     ctx.args = ["7462033455"]
     await bot.cmd_revoke(admin_update, ctx)
-    check("Permanent admin 7462033455 cannot be revoked", 7462033455 in bot.ADMIN_IDS)
+    check("Permanent admin 7462033455 cannot be revoked", 7462033455 == bot.ADMIN_ID)
 
     # Non-admin cannot authorize
     non_admin_update = MagicMock()
@@ -624,26 +624,46 @@ async def run_admin_mgmt_tests():
     await bot.cmd_authorize(non_admin_update, ctx)
     check("Non-admin cannot authorize others", 888888888 not in bot._authorized_users)
 
+    # Authorized teacher cannot authorize others
+    teacher_id = 777111222
+    bot._authorized_users.add(teacher_id)
+    teacher_update = MagicMock()
+    teacher_update.effective_user.id = teacher_id
+    teacher_update.message = AsyncMock()
+    ctx.args = ["888888888"]
+    await bot.cmd_authorize(teacher_update, ctx)
+    check("Authorized teacher cannot authorize others", 888888888 not in bot._authorized_users)
+
+    # Authorized teacher cannot revoke others
+    ctx.args = ["555666777"]
+    await bot.cmd_revoke(teacher_update, ctx)
+    revoke_reply = teacher_update.message.reply_text.call_args[0][0]
+    check("Authorized teacher cannot revoke others", "Only the bot administrator" in revoke_reply)
+
+    # Authorized teacher cannot view /teachers list
+    await bot.cmd_teachers(teacher_update, ctx)
+    teachers_reply = teacher_update.message.reply_text.call_args[0][0]
+    check("Authorized teacher cannot view /teachers", "Only the bot administrator" in teachers_reply)
+
 asyncio.run(run_admin_mgmt_tests())
 
 # ===========================================================================
-# Test 16: Admin Authentication by entering permanent admin ID
+# Test 16: Teacher Authentication by entering permanent admin ID
 # ===========================================================================
-print("\n--- Test 16: Admin Authentication by entering permanent admin ID ---")
+print("\n--- Test 16: Teacher Authentication by entering permanent admin ID ---")
 
 async def run_admin_id_auth_tests():
     new_user_id = 1122334455
     new_user_update = MagicMock()
     new_user = MagicMock()
     new_user.id = new_user_id
-    new_user.username = "new_admin_user"
-    new_user.first_name = "NewAdmin"
+    new_user.username = "new_teacher_user"
+    new_user.first_name = "NewTeacher"
     new_user_update.effective_user = new_user
     new_user_update.effective_chat.id = new_user_id
     new_user_update.message = AsyncMock()
 
     # Initial state: not admin, not authorized
-    bot._admin_users.discard(new_user_id)
     bot._authorized_users.discard(new_user_id)
     check("New user initially not admin", not bot._is_admin(new_user_update))
     check("New user initially not authorized", not bot._is_authorized(new_user_update))
@@ -652,18 +672,25 @@ async def run_admin_id_auth_tests():
     new_user_update.message.text = "Hello bot"
     await bot.handle_text(new_user_update, MagicMock())
     check("Random text does not grant admin access", not bot._is_admin(new_user_update))
+    check("Random text does not grant teacher access", not bot._is_authorized(new_user_update))
     reply_call = new_user_update.message.reply_text.call_args[0][0]
-    check("Non-admin receives student welcome on regular text", "Your account is registered with Ariel's English Class" in reply_call)
+    check("Non-authorized receives student welcome on regular text", "Your account is registered with Ariel's English Class" in reply_call)
 
     # User enters the permanent admin ID (as text)
     new_user_update.message.reply_text.reset_mock()
     new_user_update.message.text = str(bot.ADMIN_ID)
     await bot.handle_text(new_user_update, MagicMock())
 
-    check("User granted admin after entering permanent admin ID", bot._is_admin(new_user_update))
     check("User is authorized after entering permanent admin ID", bot._is_authorized(new_user_update))
+    check("User is NOT admin after entering permanent admin ID (strictly teacher)", not bot._is_admin(new_user_update))
     all_replies = [call[0][0] for call in new_user_update.message.reply_text.call_args_list if call[0]]
-    check("Reply confirms Administrator Access Granted", any("Administrator Access Granted" in r for r in all_replies))
+    check("Reply confirms Teacher Access Granted", any("Teacher Access Granted" in r for r in all_replies))
+
+    # Verify this teacher CANNOT manage teachers
+    ctx = MagicMock()
+    ctx.args = ["333444555"]
+    await bot.cmd_authorize(new_user_update, ctx)
+    check("Teacher who entered ID cannot authorize others", 333444555 not in bot._authorized_users)
 
     # Test via /auth <permanent_id> for another user
     auth_user_id = 9988776655
@@ -679,8 +706,14 @@ async def run_admin_id_auth_tests():
     ctx.args = [str(bot.ADMIN_ID)]
 
     await bot.cmd_auth(auth_update, ctx)
-    check("User granted admin via /auth <admin_id>", bot._is_admin(auth_update))
     check("User is authorized via /auth <admin_id>", bot._is_authorized(auth_update))
+    check("User is NOT admin via /auth <admin_id> (strictly teacher)", not bot._is_admin(auth_update))
+
+    # Clean up test user IDs
+    bot._authorized_users.discard(new_user_id)
+    bot._authorized_users.discard(auth_user_id)
+    bot._authorized_users.discard(777111222)
+    bot._save_authorized_users()
 
 asyncio.run(run_admin_id_auth_tests())
 

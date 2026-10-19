@@ -10,16 +10,22 @@ A clean, friendly Telegram bot supporting multiple independent users (e.g. teach
 
 ### 🔑 Complete Workflow & Architecture:
 
-1. **Teacher Access & Permanent Admin Verification:**
-   - Permanent administrators are defined via `ADMIN_TELEGRAM_ID` on Railway / `.env` (with `7462033455` as fallback permanent admin).
-   - **Gaining Admin Access via Permanent Admin ID:** When a user enters the permanent admin ID into the chat (as plain text or via `/auth <Admin_ID>`), the bot immediately grants them full administrator and teacher access, unlocks their Dashboard, and displays the `[👥 Manage Teachers]` control panel.
-   - **Administrator Rights:**
-     - `/authorize <user_id>` or `/authorize @username` — Grant teacher privileges directly by Telegram ID or username.
-     - `/revoke <user_id>` — Revoke teacher or additional admin privileges (permanent administrators cannot be revoked).
-     - `/teachers` — View all permanent admins, authorized admins, and teachers.
-     - `[👥 Manage Teachers]` — Dashboard button with one-tap revocation.
-   - **Persistence:** Authorized teachers (`authorized_users.json`) and authorized admins (`admin_users.json`) are persisted to disk to survive bot restarts.
-   - **Authorized Teachers:** Can manage their own student rosters, due dates, and reminders.
+1. **Teacher Access & Single Permanent Administrator:**
+   - There is strictly **ONE Permanent Administrator**, defined via `ADMIN_TELEGRAM_ID` on Railway / `.env` (with `7462033455` as fallback permanent admin).
+   - **Exclusive Administrator Rights:**
+     - Only the ONE Permanent Administrator can perform actions regarding teachers:
+       - `/authorize <user_id>` or `/authorize @username` — Grant teacher privileges directly by Telegram ID or username.
+       - `/revoke <user_id>` — Revoke teacher privileges (the permanent administrator cannot be revoked).
+       - `/teachers` — View the permanent administrator and all authorized teachers.
+       - `[👥 Manage Teachers]` — Dashboard button visible exclusively to the Permanent Administrator with one-tap teacher revocation.
+   - **Teacher Access (No Admin Actions):**
+     - Teachers can gain access in two ways:
+       1. **Entering Admin ID:** Sending the permanent admin ID into the chat (as plain text or via `/auth <Admin_ID>`).
+       2. **Authorized by Admin:** Being authorized directly by the permanent administrator via `/authorize`.
+     - In both cases, users receive **Teacher access only** (their Dashboard unlocks with student management tools).
+     - Authorized teachers **CANNOT** take any action about other teachers (they cannot view `/teachers`, cannot `/authorize`, cannot `/revoke`, and do not have the `[👥 Manage Teachers]` button).
+   - **Persistence:** Authorized teachers (`authorized_users.json`) are persisted to disk to survive bot restarts.
+   - **Authorized Teachers:** Can manage their own student rosters, due dates, Excel uploads, student deletions, and payment reminders.
 
 2. **Clean Student Experience:**
    - When a student opens the bot and sends `/start`, the bot captures their Telegram username and numeric chat ID automatically to `data/chat_id_registry.json`.
