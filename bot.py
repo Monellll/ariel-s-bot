@@ -49,9 +49,13 @@ try:
 except ValueError:
     ADMIN_TELEGRAM_ID = 7462033455
 
-# The single permanent administrator defined strictly by Railway / .env
-ADMIN_ID: int = ADMIN_TELEGRAM_ID
-ADMIN_IDS: set[int] = {ADMIN_ID}
+# Permanent administrators (always configured from .env and 7462033455 fallback)
+PERMANENT_ADMIN_IDS: set[int] = {7462033455}
+if ADMIN_TELEGRAM_ID:
+    PERMANENT_ADMIN_IDS.add(ADMIN_TELEGRAM_ID)
+
+ADMIN_ID: int = ADMIN_TELEGRAM_ID or 7462033455
+ADMIN_IDS: set[int] = set(PERMANENT_ADMIN_IDS)
 
 TIMEZONE: str = os.getenv("TIMEZONE", "Asia/Yangon")
 REMINDER_DAYS_BEFORE: int = int(os.getenv("REMINDER_DAYS_BEFORE", "5"))
@@ -62,6 +66,7 @@ REMINDER_MINUTE = 0
 
 DATA_DIR = Path("data")
 AUTHORIZED_USERS_PATH = DATA_DIR / "authorized_users.json"
+ADMIN_USERS_PATH = DATA_DIR / "admin_users.json"
 CHAT_ID_REGISTRY_PATH = DATA_DIR / "chat_id_registry.json"
 LOGS_DIR = Path("logs")
 
@@ -126,6 +131,7 @@ def _user_sent_reminders_path(user_id: int) -> Path:
 
 _user_records: dict[int, list[dict]] = {}
 _authorized_users: set[int] = set()
+_admin_users: set[int] = set()
 _pending_auth: set[int] = set()
 _chat_id_registry: dict[str, int] = {}
 _scheduler: AsyncIOScheduler | None = None
@@ -137,9 +143,34 @@ PAGE_SIZE = 6
 # ---------------------------------------------------------------------------
 
 
+def _load_admin_users() -> set[int]:
+    """Load authorized admin IDs from JSON. Permanent admins are always included."""
+    admins = set(PERMANENT_ADMIN_IDS)
+    if ADMIN_USERS_PATH.exists():
+        try:
+            with open(ADMIN_USERS_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, list):
+                admins.update(int(uid) for uid in data)
+        except (json.JSONDecodeError, OSError, ValueError) as exc:
+            logger.warning("Could not load admin_users.json: %s", exc)
+    admins.update(PERMANENT_ADMIN_IDS)
+    return admins
+
+
+def _save_admin_users() -> None:
+    """Save authorized admin IDs to JSON."""
+    try:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        with open(ADMIN_USERS_PATH, "w", encoding="utf-8") as f:
+            json.dump(sorted(_admin_users), f, indent=2)
+    except OSError as exc:
+        logger.error("Could not save admin_users.json: %s", exc)
+
+
 def _load_authorized_users() -> set[int]:
-    """Load authorized user IDs from JSON. Main admin is always included."""
-    users = {ADMIN_ID}
+    """Load authorized user IDs from JSON. Admins are always included."""
+    users = set(PERMANENT_ADMIN_IDS) | _admin_users
     if AUTHORIZED_USERS_PATH.exists():
         try:
             with open(AUTHORIZED_USERS_PATH, "r", encoding="utf-8") as f:
@@ -148,7 +179,8 @@ def _load_authorized_users() -> set[int]:
                 users.update(int(uid) for uid in data)
         except (json.JSONDecodeError, OSError, ValueError) as exc:
             logger.warning("Could not load authorized_users.json: %s", exc)
-    users.add(ADMIN_ID)
+    users.update(PERMANENT_ADMIN_IDS)
+    users.update(_admin_users)
     return users
 
 
@@ -160,6 +192,30 @@ def _save_authorized_users() -> None:
             json.dump(sorted(_authorized_users), f, indent=2)
     except OSError as exc:
         logger.error("Could not save authorized_users.json: %s", exc)
+
+
+def _grant_admin_access(user_id: int) -> None:
+    """Grant administrator & teacher privileges to user_id and persist immediately."""
+    global ADMIN_IDS
+    _admin_users.add(user_id)
+    _save_admin_users()
+    _authorized_users.add(user_id)
+    _save_authorized_users()
+    ADMIN_IDS.update(PERMANENT_ADMIN_IDS | _admin_users)
+
+
+def _revoke_user_access(user_id: int) -> bool:
+    """Revoke user privileges if not a permanent admin."""
+    global ADMIN_IDS
+    if user_id in PERMANENT_ADMIN_IDS:
+        return False
+    _admin_users.discard(user_id)
+    _save_admin_users()
+    _authorized_users.discard(user_id)
+    _save_authorized_users()
+    ADMIN_IDS.clear()
+    ADMIN_IDS.update(PERMANENT_ADMIN_IDS | _admin_users)
+    return True
 
 
 def _load_chat_id_registry() -> dict[str, int]:
@@ -220,15 +276,24 @@ def _resolve_chat_ids(records: list[dict]) -> int:
 
 
 def _is_admin(update: Update) -> bool:
-    """Check if the user is the single permanent administrator configured in Railway."""
-    return update.effective_user is not None and update.effective_user.id == ADMIN_ID
+    """Check if the user has administrator privileges (permanent or authenticated)."""
+    if update.effective_user is None:
+        return False
+    uid = update.effective_user.id
+    return uid in PERMANENT_ADMIN_IDS or uid in _admin_users or uid in ADMIN_IDS
 
 
 def _is_authorized(update: Update) -> bool:
-    """Check if the user is an authorized teacher or the main administrator."""
+    """Check if the user is an authorized teacher or administrator."""
     if update.effective_user is None:
         return False
-    return update.effective_user.id == ADMIN_ID or update.effective_user.id in _authorized_users
+    uid = update.effective_user.id
+    return (
+        uid in PERMANENT_ADMIN_IDS
+        or uid in _admin_users
+        or uid in ADMIN_IDS
+        or uid in _authorized_users
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -261,17 +326,28 @@ def _build_main_menu_keyboard(is_admin: bool = False) -> InlineKeyboardMarkup:
 def _render_teachers_list() -> tuple[str, InlineKeyboardMarkup]:
     """Render the list of teachers and access control buttons for administrators."""
     id_to_uname = {cid: uname for uname, cid in _chat_id_registry.items()}
-    admin_uname = id_to_uname.get(ADMIN_ID, "Admin")
 
     lines = [
         "👥 <b>Teacher & Administrator Access</b>",
         "━━━━━━━━━━━━━━━━━━━━━",
-        f"👑 <b>Permanent Administrator:</b>\n  • <code>{ADMIN_ID}</code> ({admin_uname})",
-        "",
-        "🎓 <b>Authorized Teachers:</b>",
+        "👑 <b>Permanent Administrator(s):</b>",
     ]
+    for pid in sorted(PERMANENT_ADMIN_IDS):
+        uname = id_to_uname.get(pid, "Admin")
+        lines.append(f"  • <code>{pid}</code> ({uname})")
 
-    other_teachers = sorted([uid for uid in _authorized_users if uid != ADMIN_ID])
+    other_admins = sorted([uid for uid in _admin_users if uid not in PERMANENT_ADMIN_IDS])
+    if other_admins:
+        lines.append("\n👑 <b>Authorized Administrators:</b>")
+        for uid in other_admins:
+            uname = id_to_uname.get(uid, "Admin")
+            lines.append(f"  • <code>{uid}</code> ({uname})")
+
+    other_teachers = sorted([
+        uid for uid in _authorized_users
+        if uid not in PERMANENT_ADMIN_IDS and uid not in _admin_users
+    ])
+    lines.append("\n🎓 <b>Authorized Teachers:</b>")
     if other_teachers:
         for uid in other_teachers:
             uname = id_to_uname.get(uid, "Teacher")
@@ -285,10 +361,12 @@ def _render_teachers_list() -> tuple[str, InlineKeyboardMarkup]:
     lines.append("<i>(or /authorize @username if they tapped Start)</i>")
 
     buttons = []
-    for uid in other_teachers:
+    # Both authorized admins and teachers can be revoked if they are not permanent admins
+    revokable = [(uid, "Admin") for uid in other_admins] + [(uid, "Teacher") for uid in other_teachers]
+    for uid, role in revokable:
         uname = id_to_uname.get(uid, str(uid))
         buttons.append([
-            InlineKeyboardButton(f"❌ Revoke {uname} ({uid})", callback_data=f"teacher:revoke:{uid}")
+            InlineKeyboardButton(f"❌ Revoke {uname} ({role})", callback_data=f"teacher:revoke:{uid}")
         ])
 
     buttons.append([InlineKeyboardButton("⬅️ Back to Menu", callback_data="menu:home")])
@@ -787,16 +865,15 @@ async def cmd_revoke(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             await update.message.reply_text("❌ Please provide a valid numeric Telegram ID.")
             return
 
-    if target_id == ADMIN_ID:
-        await update.message.reply_text("❌ Cannot revoke the permanent administrator.")
+    if target_id in PERMANENT_ADMIN_IDS:
+        await update.message.reply_text("❌ Cannot revoke a permanent administrator.")
         return
 
-    if target_id in _authorized_users:
-        _authorized_users.discard(target_id)
-        _save_authorized_users()
-        await update.message.reply_text(f"✅ Teacher access for <code>{target_id}</code> has been revoked.", parse_mode="HTML")
+    if target_id in _authorized_users or target_id in _admin_users:
+        _revoke_user_access(target_id)
+        await update.message.reply_text(f"✅ Access for <code>{target_id}</code> has been revoked.", parse_mode="HTML")
     else:
-        await update.message.reply_text(f"ℹ️ User <code>{target_id}</code> is not in the authorized teachers list.", parse_mode="HTML")
+        await update.message.reply_text(f"ℹ️ User <code>{target_id}</code> is not in the authorized access list.", parse_mode="HTML")
 
 
 async def cmd_teachers(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -810,14 +887,45 @@ async def cmd_teachers(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 
 async def cmd_auth(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """/auth — Admin helper command (redirects to /authorize)."""
-    if _is_admin(update):
-        if context.args:
-            await cmd_authorize(update, context)
+    """/auth <Admin_ID> — Enter permanent admin ID to gain admin access, or admin authorizing a teacher."""
+    user = update.effective_user
+    if not user:
+        return
+    user_id = user.id
+    args = context.args or []
+
+    if not args:
+        if _is_admin(update):
+            await update.message.reply_text(
+                "👑 <b>Admin Usage:</b>\n"
+                "• <code>/authorize &lt;Telegram_ID&gt;</code> to grant teacher access.\n"
+                "• <code>/revoke &lt;Telegram_ID&gt;</code> to revoke access.",
+                parse_mode="HTML",
+            )
         else:
-            await update.message.reply_text("👑 <b>Admin Usage:</b> <code>/authorize &lt;Telegram_ID&gt;</code> to grant teacher access.", parse_mode="HTML")
+            await update.message.reply_text(
+                "🔑 <b>Admin Authorization:</b>\n"
+                "Enter the permanent Admin ID or type <code>/auth &lt;Admin_ID&gt;</code> to gain admin access.",
+                parse_mode="HTML",
+            )
+        return
+
+    entered_id = args[0].strip().replace(" ", "")
+    if entered_id in [str(x) for x in PERMANENT_ADMIN_IDS]:
+        _grant_admin_access(user_id)
+        logger.info("User %s (%s) granted admin access via /auth", user_id, user.username)
+        await update.message.reply_text(
+            "👑 <b>Administrator Access Granted!</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━━\n"
+            "Welcome! You now have full administrator and teacher access to Ariel's Bot. ✨\n\n"
+            "Opening your Control Panel…",
+            parse_mode="HTML",
+        )
+        await cmd_start(update, context)
+    elif _is_admin(update):
+        await cmd_authorize(update, context)
     else:
-        await update.message.reply_text("🔒 Only the permanent administrator can grant teacher access.", parse_mode="HTML")
+        await update.message.reply_text("❌ Incorrect Admin ID. Access denied.")
 
 
 # ---------------------------------------------------------------------------
@@ -977,14 +1085,13 @@ async def handle_callback_query(
             await query.answer("❌ Admin access required.", show_alert=True)
             return
         target_id = int(data.split(":")[2])
-        if target_id in ADMIN_IDS:
+        if target_id in PERMANENT_ADMIN_IDS:
             await query.answer("❌ Cannot revoke permanent admin.", show_alert=True)
             return
-        _authorized_users.discard(target_id)
-        _save_authorized_users()
+        _revoke_user_access(target_id)
         await query.answer(f"✅ Revoked {target_id}!", show_alert=False)
         text, keyboard = _render_teachers_list()
-        text = f"✅ <b>Revoked teacher {target_id} successfully.</b>\n\n" + text
+        text = f"✅ <b>Revoked user {target_id} successfully.</b>\n\n" + text
         await _safe_edit_message(query, text, reply_markup=keyboard, parse_mode="HTML")
 
     else:
@@ -1090,6 +1197,25 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if user:
         _register_chat_id(user.username, chat_id)
 
+    raw_text = (update.message.text or "").strip()
+    cleaned = raw_text.replace(" ", "")
+
+    # If the user enters the permanent admin ID, grant full admin access!
+    if user and cleaned in [str(x) for x in PERMANENT_ADMIN_IDS]:
+        user_id = user.id
+        _grant_admin_access(user_id)
+        logger.info("User %s (%s) granted admin access by entering permanent admin ID.", user_id, user.username)
+
+        await update.message.reply_text(
+            "👑 <b>Administrator Access Granted!</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━━\n"
+            "Welcome! You now have full administrator and teacher access to Ariel's Bot. ✨\n\n"
+            "Opening your Control Panel…",
+            parse_mode="HTML",
+        )
+        await cmd_start(update, context)
+        return
+
     if _is_authorized(update):
         await update.message.reply_text(
             "💡 <i>Tip: Send an Excel file (<code>.xlsx</code>) anytime to update your student roster, or type /menu to open your dashboard.</i>",
@@ -1149,9 +1275,11 @@ async def _run_daily_check(bot) -> None:
 
 async def on_startup(application: Application) -> None:
     """Load authorized users, chat ID registry, and student rosters."""
-    global _scheduler, _authorized_users, _chat_id_registry
+    global _scheduler, _authorized_users, _admin_users, _chat_id_registry, ADMIN_IDS
 
+    _admin_users = _load_admin_users()
     _authorized_users = _load_authorized_users()
+    ADMIN_IDS = set(PERMANENT_ADMIN_IDS) | _admin_users
     _chat_id_registry = _load_chat_id_registry()
 
     # Register commands for the Telegram Menu button (bottom-left [Menu] button in chat)

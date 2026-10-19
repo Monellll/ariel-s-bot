@@ -10,15 +10,16 @@ A clean, friendly Telegram bot supporting multiple independent users (e.g. teach
 
 ### 🔑 Complete Workflow & Architecture:
 
-1. **Teacher Access & Single Permanent Admin:**
-   - There is **strictly ONE permanent administrator**, which is the numeric Telegram ID configured in `ADMIN_TELEGRAM_ID` on Railway.
-   - **Only this permanent admin** has administrative rights over teachers:
+1. **Teacher Access & Permanent Admin Verification:**
+   - Permanent administrators are defined via `ADMIN_TELEGRAM_ID` on Railway / `.env` (with `7462033455` as fallback permanent admin).
+   - **Gaining Admin Access via Permanent Admin ID:** When a user enters the permanent admin ID into the chat (as plain text or via `/auth <Admin_ID>`), the bot immediately grants them full administrator and teacher access, unlocks their Dashboard, and displays the `[👥 Manage Teachers]` control panel.
+   - **Administrator Rights:**
      - `/authorize <user_id>` or `/authorize @username` — Grant teacher privileges directly by Telegram ID or username.
-     - `/revoke <user_id>` — Revoke teacher privileges.
-     - `/teachers` — View all authorized teachers.
-     - `[👥 Manage Teachers]` — Dashboard button (visible ONLY to the permanent admin) with one-tap teacher revocation.
-   - **Authorized Teachers:** Can manage their own student rosters, due dates, and reminders, but **cannot** authorize or manage other teachers.
-   - **Zero Backdoors:** Self-authorization is eliminated; only the permanent admin can grant teacher access.
+     - `/revoke <user_id>` — Revoke teacher or additional admin privileges (permanent administrators cannot be revoked).
+     - `/teachers` — View all permanent admins, authorized admins, and teachers.
+     - `[👥 Manage Teachers]` — Dashboard button with one-tap revocation.
+   - **Persistence:** Authorized teachers (`authorized_users.json`) and authorized admins (`admin_users.json`) are persisted to disk to survive bot restarts.
+   - **Authorized Teachers:** Can manage their own student rosters, due dates, and reminders.
 
 2. **Clean Student Experience:**
    - When a student opens the bot and sends `/start`, the bot captures their Telegram username and numeric chat ID automatically to `data/chat_id_registry.json`.

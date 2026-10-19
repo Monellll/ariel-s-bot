@@ -411,7 +411,7 @@ check("Message contains dynamic October 14th", "October 14th" in msg_default)
 check("Message contains Myanmar October 14", "October 14 ရက်နေ့" in msg_default)
 check("Message contains fee for the class text", "fee for the class is due on" in msg_default)
 check("Message contains gentle reminder text", "No worries at all, just a gentle reminder." in msg_default)
-check("Message contains Myanmar fee text", "ဒီလအတွက် သင်တန်းကြေးလေးက" in msg_default)
+check("Message contains Myanmar fee text", "ချယ်ချယ်တို့ရဲ့သင်တန်းလေးကိုဒီလအတွက်" in msg_default)
 check("Message contains Myanmar polite closing", "မလောပါဘူးရှင် remind လုပ်တာပါနော်🤍" in msg_default)
 check("Message does not contain start_date reference", "since we started" not in msg_default)
 
@@ -422,7 +422,7 @@ msg_en = reminder_scheduler.format_reminder_message(
     language="english",
 )
 check("English-only contains English text", "fee for the class is due on October 14th" in msg_en)
-check("English-only does NOT contain Myanmar text", "ဒီလအတွက် သင်တန်းကြေးလေးက" not in msg_en)
+check("English-only does NOT contain Myanmar text", "ချယ်ချယ်တို့ရဲ့သင်တန်းလေးကိုဒီလအတွက်" not in msg_en)
 
 # Burmese-only
 msg_my = reminder_scheduler.format_reminder_message(
@@ -430,7 +430,7 @@ msg_my = reminder_scheduler.format_reminder_message(
     due_date=datetime.date(2026, 10, 14),
     language="burmese",
 )
-check("Burmese-only contains Myanmar text", "ဒီလအတွက် သင်တန်းကြေးလေးက October 14 ရက်နေ့" in msg_my)
+check("Burmese-only contains Myanmar text", "ချယ်ချယ်တို့ရဲ့သင်တန်းလေးကိုဒီလအတွက်" in msg_my)
 check("Burmese-only does NOT contain English text", "fee for the class is due" not in msg_my)
 
 # ===========================================================================
@@ -625,6 +625,64 @@ async def run_admin_mgmt_tests():
     check("Non-admin cannot authorize others", 888888888 not in bot._authorized_users)
 
 asyncio.run(run_admin_mgmt_tests())
+
+# ===========================================================================
+# Test 16: Admin Authentication by entering permanent admin ID
+# ===========================================================================
+print("\n--- Test 16: Admin Authentication by entering permanent admin ID ---")
+
+async def run_admin_id_auth_tests():
+    new_user_id = 1122334455
+    new_user_update = MagicMock()
+    new_user = MagicMock()
+    new_user.id = new_user_id
+    new_user.username = "new_admin_user"
+    new_user.first_name = "NewAdmin"
+    new_user_update.effective_user = new_user
+    new_user_update.effective_chat.id = new_user_id
+    new_user_update.message = AsyncMock()
+
+    # Initial state: not admin, not authorized
+    bot._admin_users.discard(new_user_id)
+    bot._authorized_users.discard(new_user_id)
+    check("New user initially not admin", not bot._is_admin(new_user_update))
+    check("New user initially not authorized", not bot._is_authorized(new_user_update))
+
+    # User enters a random non-admin string
+    new_user_update.message.text = "Hello bot"
+    await bot.handle_text(new_user_update, MagicMock())
+    check("Random text does not grant admin access", not bot._is_admin(new_user_update))
+    reply_call = new_user_update.message.reply_text.call_args[0][0]
+    check("Non-admin receives student welcome on regular text", "Your account is registered with Ariel's English Class" in reply_call)
+
+    # User enters the permanent admin ID (as text)
+    new_user_update.message.reply_text.reset_mock()
+    new_user_update.message.text = str(bot.ADMIN_ID)
+    await bot.handle_text(new_user_update, MagicMock())
+
+    check("User granted admin after entering permanent admin ID", bot._is_admin(new_user_update))
+    check("User is authorized after entering permanent admin ID", bot._is_authorized(new_user_update))
+    all_replies = [call[0][0] for call in new_user_update.message.reply_text.call_args_list if call[0]]
+    check("Reply confirms Administrator Access Granted", any("Administrator Access Granted" in r for r in all_replies))
+
+    # Test via /auth <permanent_id> for another user
+    auth_user_id = 9988776655
+    auth_update = MagicMock()
+    auth_user = MagicMock()
+    auth_user.id = auth_user_id
+    auth_user.username = "auth_tester"
+    auth_user.first_name = "AuthTester"
+    auth_update.effective_user = auth_user
+    auth_update.effective_chat.id = auth_user_id
+    auth_update.message = AsyncMock()
+    ctx = MagicMock()
+    ctx.args = [str(bot.ADMIN_ID)]
+
+    await bot.cmd_auth(auth_update, ctx)
+    check("User granted admin via /auth <admin_id>", bot._is_admin(auth_update))
+    check("User is authorized via /auth <admin_id>", bot._is_authorized(auth_update))
+
+asyncio.run(run_admin_id_auth_tests())
 
 # ===========================================================================
 # Summary
