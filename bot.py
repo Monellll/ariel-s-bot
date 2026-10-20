@@ -189,18 +189,38 @@ def _revoke_user_access(user_id: int) -> bool:
     return True
 
 
+ROSTER_PAGE_SIZE = 10
+
+
 def _load_chat_id_registry() -> dict[str, int]:
-    """Load the @username -> chat_id registry from JSON."""
-    if not CHAT_ID_REGISTRY_PATH.exists():
-        return {}
-    try:
-        with open(CHAT_ID_REGISTRY_PATH, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        if isinstance(data, dict):
-            return {k.lower(): int(v) for k, v in data.items()}
-    except (json.JSONDecodeError, OSError, ValueError) as exc:
-        logger.warning("Could not load chat_id_registry.json: %s", exc)
-    return {}
+    """Load the @username -> chat_id registry from environment variable and JSON."""
+    registry: dict[str, int] = {}
+
+    # 1. Load from Railway Environment Variable (CHAT_ID_REGISTRY) if configured
+    env_data = os.getenv("CHAT_ID_REGISTRY")
+    if env_data:
+        try:
+            parsed = json.loads(env_data)
+            if isinstance(parsed, dict):
+                for k, v in parsed.items():
+                    clean_k = f"@{str(k).lower().lstrip('@')}"
+                    registry[clean_k] = int(v)
+        except Exception as exc:
+            logger.warning("Could not parse CHAT_ID_REGISTRY env var: %s", exc)
+
+    # 2. Merge with disk file
+    if CHAT_ID_REGISTRY_PATH.exists():
+        try:
+            with open(CHAT_ID_REGISTRY_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                for k, v in data.items():
+                    clean_k = f"@{str(k).lower().lstrip('@')}"
+                    registry[clean_k] = int(v)
+        except (json.JSONDecodeError, OSError, ValueError) as exc:
+            logger.warning("Could not load chat_id_registry.json: %s", exc)
+
+    return registry
 
 
 def _save_chat_id_registry() -> None:
@@ -225,20 +245,25 @@ def _register_chat_id(username: str | None, chat_id: int) -> None:
 
 
 def _resolve_chat_ids(records: list[dict]) -> int:
-    """Fill in missing telegram_chat_id from the registry. Returns matched count."""
-    resolved = 0
+    """Fill in missing telegram_chat_id from the registry. Returns total connected count."""
+    global _chat_id_registry
+    try:
+        disk_registry = _load_chat_id_registry()
+        if disk_registry:
+            _chat_id_registry.update(disk_registry)
+    except Exception as exc:
+        logger.warning("Could not refresh chat_id_registry from disk: %s", exc)
+
     for rec in records:
-        if rec.get("telegram_chat_id"):
-            continue
-        username = rec.get("telegram_username")
-        if not username:
-            continue
-        key = username.lower()
-        chat_id = _chat_id_registry.get(key)
-        if chat_id:
-            rec["telegram_chat_id"] = chat_id
-            resolved += 1
-    return resolved
+        if not rec.get("telegram_chat_id"):
+            username = rec.get("telegram_username")
+            if username:
+                clean = username.lower().lstrip("@")
+                chat_id = _chat_id_registry.get(f"@{clean}") or _chat_id_registry.get(clean)
+                if chat_id:
+                    rec["telegram_chat_id"] = chat_id
+
+    return sum(1 for r in records if r.get("telegram_chat_id"))
 
 
 # ---------------------------------------------------------------------------
@@ -379,33 +404,47 @@ def _get_home_text(user_id: int, user_name: str) -> str:
     return "\n".join(lines)
 
 
-def _render_roster_text(user_id: int) -> str:
-    """Clean, beautifully organized summary of student roster and status."""
+def _render_roster_page(
+    user_id: int, page: int = 0
+) -> tuple[str, InlineKeyboardMarkup]:
+    """Clean, beautifully organized summary of student roster and status with pagination."""
     records = _user_records.get(user_id, [])
     total = len(records)
     if total == 0:
-        return (
+        text = (
             "📋 <b>Your Student Roster</b>\n"
             "━━━━━━━━━━━━━━━━━━━━━\n\n"
             "<i>No student roster loaded yet.</i>\n\n"
             "📤 <b>To get started:</b>\n"
             "Simply send your Google Sheet link or attach an Excel file (<code>.xlsx</code>) right here in this chat!"
         )
+        keyboard = InlineKeyboardMarkup(
+            [[InlineKeyboardButton("⬅️ Back to Menu", callback_data="menu:home")]]
+        )
+        return text, keyboard
 
     _resolve_chat_ids(records)
     linked = sum(1 for r in records if r.get("telegram_chat_id"))
     missing = total - linked
 
-    lines = [
-        "📋 <b>Student Roster</b>",
-        "━━━━━━━━━━━━━━━━━━━━━",
-        f"📊 <b>Summary:</b> <b>{total}</b> total  •  ✅ <b>{linked}</b> ready  •  ⚠️ <b>{missing}</b> pending\n",
-    ]
+    total_pages = max(1, (total + ROSTER_PAGE_SIZE - 1) // ROSTER_PAGE_SIZE)
+    page = max(0, min(page, total_pages - 1))
+
+    start_idx = page * ROSTER_PAGE_SIZE
+    end_idx = min(start_idx + ROSTER_PAGE_SIZE, total)
 
     today = datetime.datetime.now(ZoneInfo(TIMEZONE)).date()
     sorted_recs = sorted(records, key=lambda r: r.get("due_date") or datetime.date.max)
+    page_records = sorted_recs[start_idx:end_idx]
 
-    for i, r in enumerate(sorted_recs[:15], 1):
+    lines = [
+        "📋 <b>Student Roster</b>",
+        "━━━━━━━━━━━━━━━━━━━━━",
+        f"📊 <b>Summary:</b> <b>{total}</b> total  •  ✅ <b>{linked}</b> ready  •  ⚠️ <b>{missing}</b> pending",
+        f"📄 Page <b>{page + 1} of {total_pages}</b> (Students {start_idx + 1}–{end_idx})\n",
+    ]
+
+    for i, r in enumerate(page_records, start=start_idx + 1):
         uname = html.escape(str(r.get("telegram_username", "")))
         sname = html.escape(str(r.get("student_name", uname)))
         due = r.get("due_date")
@@ -428,13 +467,42 @@ def _render_roster_text(user_id: int) -> str:
         lines.append(f"<b>{i}. {sname}</b> (<code>{uname}</code>)")
         lines.append(f"   {status_icon} <i>{due_info}</i>\n")
 
-    if len(sorted_recs) > 15:
-        lines.append(f"<i>… and {len(sorted_recs) - 15} more student(s).</i>\n")
-
     if missing > 0:
         lines.append("💡 <i>Students marked with ⚠️ simply need to open @ariel_english_bot and tap Start.</i>")
 
-    return "\n".join(lines).strip()
+    buttons = []
+    nav_buttons = []
+    if page > 0:
+        nav_buttons.append(
+            InlineKeyboardButton("⬅️ Prev", callback_data=f"menu:roster:{page - 1}")
+        )
+    if total_pages > 1:
+        nav_buttons.append(
+            InlineKeyboardButton(
+                f"📄 {page + 1}/{total_pages}", callback_data=f"menu:roster:{page}"
+            )
+        )
+    if page < total_pages - 1:
+        nav_buttons.append(
+            InlineKeyboardButton("Next ➡️", callback_data=f"menu:roster:{page + 1}")
+        )
+    if nav_buttons:
+        buttons.append(nav_buttons)
+
+    buttons.append(
+        [
+            InlineKeyboardButton("📨 Send Reminders Now", callback_data="menu:check"),
+            InlineKeyboardButton("⬅️ Back to Menu", callback_data="menu:home"),
+        ]
+    )
+
+    return "\n".join(lines).strip(), InlineKeyboardMarkup(buttons)
+
+
+def _render_roster_text(user_id: int) -> str:
+    """Backward compatibility wrapper returning roster page 0 text."""
+    text, _ = _render_roster_page(user_id, 0)
+    return text
 
 
 # Alias for backward compatibility
@@ -635,19 +703,13 @@ async def cmd_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """/status or /roster — View student roster."""
+    """/status or /roster — View student roster with interactive pagination."""
     if not _is_authorized(update):
         await update.message.reply_text("❌ You are not authorized. Send /start to begin.")
         return
 
     user_id = update.effective_user.id
-    text = _render_roster_text(user_id)
-    keyboard = InlineKeyboardMarkup(
-        [
-            [InlineKeyboardButton("📨 Send Reminders Now", callback_data="menu:check")],
-            [InlineKeyboardButton("⬅️ Back to Menu", callback_data="menu:home")],
-        ]
-    )
+    text, keyboard = _render_roster_page(user_id, 0)
     await update.message.reply_text(text, reply_markup=keyboard, parse_mode="HTML")
 
 
@@ -1133,14 +1195,9 @@ async def handle_callback_query(
         )
         await _safe_edit_message(query, msg, reply_markup=keyboard, parse_mode="HTML")
 
-    elif data in ("menu:roster", "menu:status"):
-        text = _render_roster_text(user_id)
-        keyboard = InlineKeyboardMarkup(
-            [
-                [InlineKeyboardButton("📨 Send Reminders Now", callback_data="menu:check")],
-                [InlineKeyboardButton("⬅️ Back to Menu", callback_data="menu:home")],
-            ]
-        )
+    elif data in ("menu:roster", "menu:status") or data.startswith("menu:roster:"):
+        page = int(data.split(":")[2]) if data.startswith("menu:roster:") else 0
+        text, keyboard = _render_roster_page(user_id, page)
         await _safe_edit_message(query, text, reply_markup=keyboard, parse_mode="HTML")
 
     elif data == "menu:check":

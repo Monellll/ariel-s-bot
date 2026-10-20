@@ -940,6 +940,81 @@ async def run_repeat_reminder_tests():
     repeat_json.unlink(missing_ok=True)
 
 asyncio.run(run_repeat_reminder_tests())
+
+# ===========================================================================
+# Test 22: Dynamic Chat ID resolution from registry & disk refresh
+# ===========================================================================
+print("\n--- Test 22: Dynamic Chat ID resolution from registry & disk refresh ---")
+
+with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as tmp_reg:
+    json.dump({"@rr_lynn": 7956245349, "pan20000000": 1968605735}, tmp_reg)
+    reg_path = Path(tmp_reg.name)
+
+with patch("bot.CHAT_ID_REGISTRY_PATH", reg_path):
+    records_to_resolve = [
+        {"student_name": "Lynn", "telegram_username": "@rr_lynn", "due_date": datetime.date(2026, 10, 25)},
+        {"student_name": "Pan", "telegram_username": "@pan20000000", "due_date": datetime.date(2026, 10, 25)},
+        {"student_name": "Unknown", "telegram_username": "@not_in_reg", "due_date": datetime.date(2026, 10, 25)},
+    ]
+    resolved_count = bot._resolve_chat_ids(records_to_resolve)
+    check("Matched student with @rr_lynn", records_to_resolve[0].get("telegram_chat_id") == 7956245349)
+    check("Matched student without @ in registry (pan20000000)", records_to_resolve[1].get("telegram_chat_id") == 1968605735)
+    check("Unmatched student remains None", records_to_resolve[2].get("telegram_chat_id") is None)
+    check("Returns total resolved count (2)", resolved_count == 2)
+
+    # Now write new student to disk while app is running
+    with open(reg_path, "w") as f:
+        json.dump({"@rr_lynn": 7956245349, "pan20000000": 1968605735, "@not_in_reg": 555444333}, f)
+
+    resolved_count2 = bot._resolve_chat_ids(records_to_resolve)
+    check("Dynamically picked up new entry from disk without restart", records_to_resolve[2].get("telegram_chat_id") == 555444333)
+    check("Returns updated resolved count (3)", resolved_count2 == 3)
+
+reg_path.unlink(missing_ok=True)
+
+# ===========================================================================
+# Test 23: Interactive Roster Pagination
+# ===========================================================================
+print("\n--- Test 23: Interactive Roster Pagination ---")
+roster_test_uid = 999111222
+mock_57_students = [
+    {
+        "student_name": f"Student {i}",
+        "telegram_username": f"@student_{i}",
+        "due_date": datetime.date(2026, 10, 20) + datetime.timedelta(days=i),
+        "telegram_chat_id": 1000 + i if i % 2 == 0 else None,
+    }
+    for i in range(1, 26)
+]
+bot._user_records[roster_test_uid] = mock_57_students
+
+text_p0, kb_p0 = bot._render_roster_page(roster_test_uid, page=0)
+check("Page 1 header contains Page 1 of 3", "Page <b>1 of 3</b>" in text_p0)
+check("Page 1 contains Student 1", "<b>1. Student 1</b>" in text_p0)
+check("Page 1 contains Student 10", "<b>10. Student 10</b>" in text_p0)
+check("Page 1 does NOT contain Student 11", "<b>11. Student 11</b>" not in text_p0)
+callbacks_p0 = [btn.callback_data for row in kb_p0.inline_keyboard for btn in row]
+check("Page 1 has Next page button", "menu:roster:1" in callbacks_p0)
+check("Page 1 does NOT have Prev button", "menu:roster:-1" not in callbacks_p0)
+
+text_p1, kb_p1 = bot._render_roster_page(roster_test_uid, page=1)
+check("Page 2 header contains Page 2 of 3", "Page <b>2 of 3</b>" in text_p1)
+check("Page 2 contains Student 11", "<b>11. Student 11</b>" in text_p1)
+check("Page 2 contains Student 20", "<b>20. Student 20</b>" in text_p1)
+callbacks_p1 = [btn.callback_data for row in kb_p1.inline_keyboard for btn in row]
+check("Page 2 has Prev button (page 0)", "menu:roster:0" in callbacks_p1)
+check("Page 2 has Next button (page 2)", "menu:roster:2" in callbacks_p1)
+
+text_p2, kb_p2 = bot._render_roster_page(roster_test_uid, page=2)
+check("Page 3 header contains Page 3 of 3", "Page <b>3 of 3</b>" in text_p2)
+check("Page 3 contains Student 25", "<b>25. Student 25</b>" in text_p2)
+callbacks_p2 = [btn.callback_data for row in kb_p2.inline_keyboard for btn in row]
+check("Page 3 has Prev button (page 1)", "menu:roster:1" in callbacks_p2)
+check("Page 3 does NOT have Next button", "menu:roster:3" not in callbacks_p2)
+
+# Cleanup
+bot._user_records.pop(roster_test_uid, None)
+
 print("\n" + "=" * 50)
 passed = sum(results)
 total = len(results)
