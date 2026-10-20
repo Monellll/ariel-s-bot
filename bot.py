@@ -387,7 +387,7 @@ def _get_home_text(user_id: int, user_name: str) -> str:
             "",
             "🔗 <b>Google Sheet:</b> Connected &amp; Ready ✅",
             "⏰ <b>Reminder Automation:</b>",
-            "Automated checks run daily for students due within <b>5 days</b>.",
+            "Automated checks run daily for students due within <b>5 days</b> (and overdue every 3 days).",
             "",
             "💡 <i>Tip: Tap [Sync Google Sheet] anytime to fetch your latest student edits.</i>",
             "Choose an action below:",
@@ -396,7 +396,7 @@ def _get_home_text(user_id: int, user_name: str) -> str:
         lines += [
             "",
             "⏰ <b>Reminder Automation:</b>",
-            "Automated checks run daily for students due within <b>5 days</b>.",
+            "Automated checks run daily for students due within <b>5 days</b> (and overdue every 3 days).",
             "",
             "💡 <i>Tip: Send your Google Sheet link (or upload an <code>.xlsx</code> file) anytime to update your roster.</i>",
             "Choose an action below:",
@@ -526,7 +526,7 @@ def _render_help_text() -> str:
         "<b>3️⃣ Student Linking</b>\n"
         "Tell your students to search for <b>@ariel_english_bot</b> and tap <b>Start</b>. The bot automatically links their account!\n\n"
         "<b>4️⃣ Automated Reminders & Live Sync</b>\n"
-        "The bot automatically checks due dates daily and sends polite reminders 5 days before payment is due. Any edits in your Google Sheet can be refreshed with <b>[Sync Google Sheet]</b>!"
+        "The bot automatically checks due dates daily and sends polite reminders 5 days before payment is due, and every 3 days for overdue payments. Any edits in your Google Sheet can be refreshed with <b>[Sync Google Sheet]</b>!"
     )
 
 
@@ -718,7 +718,7 @@ def _build_check_report(res: dict, today: datetime.date) -> str:
     lines = [
         "📨 <b>Reminder Check Report</b>",
         "━━━━━━━━━━━━━━━━━━━━━",
-        f"📅 <b>Date:</b> <code>{today}</code>  •  🎯 <b>Window:</b> Next 5 days\n",
+        f"📅 <b>Date:</b> <code>{today}</code>  •  🎯 <b>Window:</b> Within 5 days & Overdue\n",
     ]
 
     if res.get("sent"):
@@ -726,14 +726,22 @@ def _build_check_report(res: dict, today: datetime.date) -> str:
         for r in res["sent"][:10]:
             sname = html.escape(str(r.get("student_name", "")))
             uname = html.escape(str(r.get("telegram_username", "")))
-            lines.append(f"  • <b>{sname}</b> (<code>{uname}</code>) — Due: <code>{r.get('due_date')}</code>")
+            due_str = str(r.get("due_date"))
+            if r.get("is_overdue"):
+                lines.append(f"  • <b>{sname}</b> (<code>{uname}</code>) — Due: <code>{due_str}</code> <i>(Overdue)</i>")
+            else:
+                lines.append(f"  • <b>{sname}</b> (<code>{uname}</code>) — Due: <code>{due_str}</code>")
         lines.append("")
 
     if res.get("already_sent"):
-        lines.append(f"ℹ️ <b>Already Sent Earlier Today ({len(res['already_sent'])}):</b>")
+        lines.append(f"ℹ️ <b>Already Sent Recently ({len(res['already_sent'])}):</b>")
         for r in res["already_sent"][:10]:
             sname = html.escape(str(r.get("student_name", "")))
-            lines.append(f"  • {sname} — Due: <code>{r.get('due_date')}</code>")
+            due_str = str(r.get("due_date"))
+            if r.get("is_overdue"):
+                lines.append(f"  • {sname} — Due: <code>{due_str}</code> <i>(Overdue)</i>")
+            else:
+                lines.append(f"  • {sname} — Due: <code>{due_str}</code>")
         lines.append("")
 
     if res.get("not_due"):
@@ -1514,15 +1522,18 @@ async def _run_daily_check(bot) -> None:
                 sent_reminders_path=_user_sent_reminders_path(user_id),
             )
             if res.get("sent"):
-                sent_names = [
-                    html.escape(str(r.get("student_name", r.get("telegram_username", "Student"))))
-                    for r in res["sent"]
-                ]
+                sent_lines = []
+                for r in res["sent"]:
+                    sname = html.escape(str(r.get("student_name", r.get("telegram_username", "Student"))))
+                    if r.get("is_overdue"):
+                        sent_lines.append(f"• {sname} <i>(Overdue)</i>")
+                    else:
+                        sent_lines.append(f"• {sname}")
                 await bot.send_message(
                     chat_id=user_id,
                     text=(
                         f"⏰ <b>Automated Reminder Sent ({len(res['sent'])}):</b>\n"
-                        + "\n".join(f"• {name}" for name in sent_names)
+                        + "\n".join(sent_lines)
                     ),
                     parse_mode="HTML",
                 )

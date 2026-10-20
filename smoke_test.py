@@ -269,8 +269,8 @@ async def _run_daily_check_test():
             f"sent_chat_ids={sent_chat_ids}",
         )
         check(
-            "Past student NOT messaged",
-            777777777 not in sent_chat_ids,
+            "Overdue student received reminder by default",
+            777777777 in sent_chat_ids,
             f"sent_chat_ids={sent_chat_ids}",
         )
 
@@ -1014,6 +1014,112 @@ check("Page 3 does NOT have Next button", "menu:roster:3" not in callbacks_p2)
 
 # Cleanup
 bot._user_records.pop(roster_test_uid, None)
+
+# ===========================================================================
+# Test 24: Overdue student 3-day repeat interval logic
+# ===========================================================================
+print("\n--- Test 24: Overdue student 3-day repeat interval logic ---")
+
+
+async def run_overdue_repeat_tests():
+    mock_overdue_bot = AsyncMock()
+    with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tmp_sent:
+        overdue_json = Path(tmp_sent.name)
+
+    overdue_rec = [
+        {
+            "student_name": "Mg Ba",
+            "telegram_username": "@mgba",
+            "due_date": datetime.date(2026, 10, 20),
+            "telegram_chat_id": 998877,
+        }
+    ]
+
+    # Day +1 (Oct 21): First overdue check -> sends overdue reminder
+    with patch("reminder_scheduler.datetime") as mock_dt:
+        mock_dt.date = datetime.date
+        mock_dt.datetime.now.return_value.date.return_value = datetime.date(2026, 10, 21)
+        res_d1 = await reminder_scheduler.daily_check(
+            bot=mock_overdue_bot,
+            records=overdue_rec,
+            sent_reminders_path=overdue_json,
+            repeat_interval_days=3,
+        )
+    check("Day +1 (Oct 21): Overdue reminder sent", len(res_d1["sent"]) == 1)
+    check("Day +1 (Oct 21): Recorded as is_overdue", res_d1["sent"][0].get("is_overdue") is True)
+    sent_msg = mock_overdue_bot.send_message.call_args[1]["text"]
+    check("Overdue message contains 'was due'", "was due on October 20th" in sent_msg)
+
+    # Day +2 (Oct 22): 1 day elapsed -> skipped
+    mock_overdue_bot.reset_mock()
+    with patch("reminder_scheduler.datetime") as mock_dt:
+        mock_dt.date = datetime.date
+        mock_dt.datetime.now.return_value.date.return_value = datetime.date(2026, 10, 22)
+        res_d2 = await reminder_scheduler.daily_check(
+            bot=mock_overdue_bot,
+            records=overdue_rec,
+            sent_reminders_path=overdue_json,
+            repeat_interval_days=3,
+        )
+    check("Day +2 (Oct 22): Skipped (1 day elapsed)", len(res_d2["sent"]) == 0)
+
+    # Day +3 (Oct 23): 2 days elapsed -> skipped
+    mock_overdue_bot.reset_mock()
+    with patch("reminder_scheduler.datetime") as mock_dt:
+        mock_dt.date = datetime.date
+        mock_dt.datetime.now.return_value.date.return_value = datetime.date(2026, 10, 23)
+        res_d3 = await reminder_scheduler.daily_check(
+            bot=mock_overdue_bot,
+            records=overdue_rec,
+            sent_reminders_path=overdue_json,
+            repeat_interval_days=3,
+        )
+    check("Day +3 (Oct 23): Skipped (2 days elapsed)", len(res_d3["sent"]) == 0)
+
+    # Day +4 (Oct 24): 3 days elapsed -> sends again
+    mock_overdue_bot.reset_mock()
+    with patch("reminder_scheduler.datetime") as mock_dt:
+        mock_dt.date = datetime.date
+        mock_dt.datetime.now.return_value.date.return_value = datetime.date(2026, 10, 24)
+        res_d4 = await reminder_scheduler.daily_check(
+            bot=mock_overdue_bot,
+            records=overdue_rec,
+            sent_reminders_path=overdue_json,
+            repeat_interval_days=3,
+        )
+    check("Day +4 (Oct 24): Overdue reminder sent again after 3 days", len(res_d4["sent"]) == 1)
+
+    # Day +5 (Oct 25): 1 day after 2nd send -> skipped
+    mock_overdue_bot.reset_mock()
+    with patch("reminder_scheduler.datetime") as mock_dt:
+        mock_dt.date = datetime.date
+        mock_dt.datetime.now.return_value.date.return_value = datetime.date(2026, 10, 25)
+        res_d5 = await reminder_scheduler.daily_check(
+            bot=mock_overdue_bot,
+            records=overdue_rec,
+            sent_reminders_path=overdue_json,
+            repeat_interval_days=3,
+        )
+    check("Day +5 (Oct 25): Skipped (1 day after 2nd send)", len(res_d5["sent"]) == 0)
+
+    # Overdue limit cutoff check (exceeds max_overdue_days=30)
+    mock_overdue_bot.reset_mock()
+    with patch("reminder_scheduler.datetime") as mock_dt:
+        mock_dt.date = datetime.date
+        mock_dt.datetime.now.return_value.date.return_value = datetime.date(2026, 12, 1)
+        res_d_expired = await reminder_scheduler.daily_check(
+            bot=mock_overdue_bot,
+            records=overdue_rec,
+            sent_reminders_path=overdue_json,
+            repeat_interval_days=3,
+            max_overdue_days=30,
+        )
+    check("Overdue > 30 days skipped and categorized in past_due", len(res_d_expired["sent"]) == 0 and len(res_d_expired["past_due"]) == 1)
+
+    overdue_json.unlink(missing_ok=True)
+
+
+asyncio.run(run_overdue_repeat_tests())
 
 print("\n" + "=" * 50)
 passed = sum(results)

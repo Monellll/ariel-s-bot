@@ -53,9 +53,9 @@ A clean, friendly Telegram bot supporting multiple independent users (e.g. teach
    - **Background Scheduler:** Dynamically configured via `CHECK_INTERVAL_MINUTES`:
      - If `CHECK_INTERVAL_MINUTES=0` (or not set): Runs in **Production Mode** once daily at 8:00 AM (`Asia/Yangon`).
      - If `CHECK_INTERVAL_MINUTES > 0`: Runs in **Test Mode** (e.g., checks every 3 minutes).
-   - **Reminder Window & 3-Day Repeat:**
-     - Initial reminder triggers **5 days before due date** (`REMINDER_DAYS_BEFORE=5`).
-     - If the student's due date is still upcoming following the Day 5 reminder, reminders are sent **again every 3 days** (`REMINDER_REPEAT_INTERVAL_DAYS=3`, e.g. Day 5 and Day 2 before due date).
+   - **Reminder Window & 3-Day Repeat (Upcoming & Overdue):**
+     - **Pre-Due:** Initial reminder triggers **5 days before due date** (`REMINDER_DAYS_BEFORE=5`), repeating **every 3 days** (`REMINDER_REPEAT_INTERVAL_DAYS=3`, e.g. Day 5 and Day 2 before due date).
+     - **Overdue:** If a student's due date has passed, the bot automatically continues sending polite reminders **once every 3 days** (e.g. Day +1, Day +4, etc., up to `MAX_OVERDUE_DAYS=30`), with adaptive phrasing ("was due on...").
    - **Bilingual Message:** Sends a polite bilingual reminder message (English + Myanmar).
    - **Teacher Alert on Auto-Send:** When the background job delivers reminders, it automatically notifies the teacher with the student names.
    - **Zero Duplicate Spam:** Date-tracked keys in `sent_reminders.json` prevent multiple sends on the same day.
@@ -66,7 +66,7 @@ A clean, friendly Telegram bot supporting multiple independent users (e.g. teach
    - **Telegram Native Menu Button**: Commands registered with Telegram API (`set_my_commands`) so the bottom-left `[ ☰ Menu ]` button always works.
    - **`run_polling(drop_pending_updates=True)`**: Cleans out old stuck backlogs on startup.
    - **Single-Worker Cloud Deployment**: Uses `railway.toml` with `startCommand = "python bot.py"` (redundant `Procfile` removed) to eliminate duplicate instance conflicts (HTTP 409).
-    - **Automated Tests:** 21 test suites and 99 assertions in `smoke_test.py` covering excel parsing, multi-sheet aggregation, dates, deduplication, 3-day repeat interval, multi-user isolation, admin rights, and callbacks.
+    - **Automated Tests:** 24 test suites and 128 assertions in `smoke_test.py` covering excel parsing, multi-sheet aggregation, dates, deduplication, 3-day pre-due & overdue repeat interval, multi-user isolation, admin rights, and callbacks.
 
 ---
 

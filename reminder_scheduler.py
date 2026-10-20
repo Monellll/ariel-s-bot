@@ -54,7 +54,7 @@ SENT_REMINDERS_PATH = Path("data/sent_reminders.json")
 REMINDER_TEMPLATE_EN = """\
 Hi!
 
-Just a friendly reminder that the fee for the class is due on {due_date_en}.
+Just a friendly reminder that the fee for the class {due_verb} on {due_date_en}.
 
 No worries at all, just a gentle reminder.
 
@@ -172,6 +172,7 @@ def format_reminder_message(
     reminder_days: int = 5,
     start_date: Optional[datetime.date] = None,
     language: str = "both",
+    is_overdue: bool = False,
 ) -> str:
     """
     Format the reminder message from the template.
@@ -182,6 +183,7 @@ def format_reminder_message(
 
     start_date_en = _format_ordinal_date(start_date) if start_date else ""
     start_date_mm = _format_myanmar_date(start_date) if start_date else ""
+    due_verb = "was due" if is_overdue else "is due"
 
     lang_normalized = (language or "both").strip().lower()
     if lang_normalized in ("burmese", "my", "myanmar", "mm"):
@@ -198,6 +200,7 @@ def format_reminder_message(
         start_date_mm=start_date_mm,
         due_date_mm=due_date_mm,
         days=reminder_days,
+        due_verb=due_verb,
     )
 
 
@@ -247,14 +250,21 @@ async def daily_check(
     admin_chat_id: Optional[int] = None,
     default_language: str = "both",
     repeat_interval_days: int = 3,
+    remind_overdue: bool = True,
+    max_overdue_days: int = 30,
 ) -> dict:
     """
     Main daily reminder check.
 
     For each record:
       - Skip if no chat_id (notify owner/admin).
-      - Skip if due_date already passed.
-      - If days_until_due == reminder_days and not already sent → send + save key.
+      - If due_date is in the past:
+          - If remind_overdue=True and within max_overdue_days:
+              Send/repeat reminder every repeat_interval_days (default 3 days).
+          - Otherwise: categorise as past_records and skip.
+      - If due_date is upcoming:
+          - If within reminder window (0 to reminder_days):
+              Send/repeat reminder every repeat_interval_days (default 3 days).
 
     Returns:
       dict with detailed breakdown of the check results:
@@ -303,18 +313,29 @@ async def daily_check(
                 logger.warning("Skipping %s: no due_date.", username)
                 continue
 
-            # Skip past due dates
-            if due_date < today:
-                past_records.append(rec)
-                continue
-
             days_until_due = (due_date - today).days
+            is_overdue = days_until_due < 0
 
-            # Send when within the reminder window (0 to reminder_days, or 0 to 5 in test mode)
-            max_days = reminder_days if reminder_days > 0 else 5
-            if not (0 <= days_until_due <= max_days):
-                not_due_records.append({**rec, "days_until_due": days_until_due})
-                continue
+            if is_overdue:
+                if not remind_overdue:
+                    past_records.append(rec)
+                    continue
+                days_overdue = (today - due_date).days
+                if max_overdue_days > 0 and days_overdue > max_overdue_days:
+                    logger.info(
+                        "Skipping %s: overdue by %d days (exceeds max_overdue_days=%d).",
+                        username,
+                        days_overdue,
+                        max_overdue_days,
+                    )
+                    past_records.append({**rec, "days_overdue": days_overdue})
+                    continue
+            else:
+                # Send when within the reminder window (0 to reminder_days, or 0 to 5 in test mode)
+                max_days = reminder_days if reminder_days > 0 else 5
+                if not (0 <= days_until_due <= max_days):
+                    not_due_records.append({**rec, "days_until_due": days_until_due})
+                    continue
 
             # No chat_id → report to owner/admin, skip
             if chat_id is None:
@@ -349,7 +370,7 @@ async def daily_check(
                     days_since_last = 999
 
                 if days_since_last < interval:
-                    already_sent_records.append(rec)
+                    already_sent_records.append({**rec, "is_overdue": is_overdue})
                     logger.info(
                         "Reminder for %s was sent %d day(s) ago (repeat interval: %d days) — skipping.",
                         reminder_key,
@@ -365,17 +386,29 @@ async def daily_check(
             rec_lang = rec.get("language")
             chosen_lang = rec_lang if rec_lang else default_language
             message = format_reminder_message(
-                student_name, due_date, reminder_days, start_date=start_date, language=chosen_lang
+                student_name,
+                due_date,
+                reminder_days,
+                start_date=start_date,
+                language=chosen_lang,
+                is_overdue=is_overdue,
             )
             try:
                 await bot.send_message(chat_id=chat_id, text=message)
                 today_iso = today.isoformat()
                 sent_keys[reminder_key] = today_iso
                 newly_sent.append(reminder_key)
-                sent_records.append(rec)
+                sent_records.append({**rec, "is_overdue": is_overdue})
                 # Immediately persist atomically to disk so no interruption can ever cause duplication
                 save_sent_reminders(sent_keys, sent_reminders_path)
-                logger.info("Reminder sent & persisted for %s (chat_id=%s, key=%s, date=%s).", username, chat_id, reminder_key, today_iso)
+                logger.info(
+                    "Reminder sent & persisted for %s (chat_id=%s, key=%s, date=%s, overdue=%s).",
+                    username,
+                    chat_id,
+                    reminder_key,
+                    today_iso,
+                    is_overdue,
+                )
             except TelegramError as exc:
                 failed.append((rec, str(exc)))
                 logger.error(
