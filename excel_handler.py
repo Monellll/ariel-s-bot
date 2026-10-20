@@ -14,6 +14,7 @@ import datetime
 import logging
 from pathlib import Path
 import re
+import shutil
 import tempfile
 from typing import Optional
 
@@ -498,8 +499,8 @@ def sync_google_sheet(
     dest = Path(dest_path)
     dest.parent.mkdir(parents=True, exist_ok=True)
 
-    # Write to a temporary file first for atomic validation
-    with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as tmp_file:
+    # Write to a temporary file in the destination folder for atomic validation
+    with tempfile.NamedTemporaryFile(dir=dest.parent, suffix=".xlsx", delete=False) as tmp_file:
         tmp_path = Path(tmp_file.name)
         tmp_file.write(content)
 
@@ -508,8 +509,8 @@ def sync_google_sheet(
         if len(valid_records) == 0:
             raise ValueError("The Google Sheet contains no valid student records.")
 
-        # Atomically replace destination file with validated content
-        tmp_path.replace(dest)
+        # Move to destination (shutil.move safely handles both same-drive and cross-drive mounts)
+        shutil.move(str(tmp_path), str(dest))
         logger.info("Successfully synced Google Sheet to %s with %d records.", dest, len(valid_records))
         return valid_records, invalid_count, errors
     finally:
